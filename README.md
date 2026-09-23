@@ -135,3 +135,7 @@ SQLite-specific checks:
 ```bash
 make test-db
 ```
+
+GitHub Actions runs `make gate` and `make build` on pushes to `main` and pull
+requests. Engine contract checks stay local or deployment-specific because they
+require the Engine MCP endpoint.
