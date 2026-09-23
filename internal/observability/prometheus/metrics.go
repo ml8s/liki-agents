@@ -1,0 +1,99 @@
+// Package prometheus exposes protocol, LLM, and dependency observations.
+package prometheus
+
+import (
+	"net/http"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+type Metrics struct {
+	registry         *prometheus.Registry
+	protocolRequests *prometheus.CounterVec
+	protocolLatency  *prometheus.HistogramVec
+	activeStreams    *prometheus.GaugeVec
+	llmTokens        *prometheus.CounterVec
+	llmCalls         *prometheus.CounterVec
+	dependencyUp     *prometheus.GaugeVec
+}
+
+func New() *Metrics {
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+	)
+	metrics := &Metrics{
+		registry: registry,
+		protocolRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "liki_agent_protocol_requests_total",
+			Help: "Agent protocol requests by protocol, operation, and status.",
+		}, []string{"protocol", "operation", "status"}),
+		protocolLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "liki_agent_protocol_request_duration_seconds",
+			Help:    "Agent protocol request duration.",
+			Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300},
+		}, []string{"protocol", "operation"}),
+		activeStreams: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "liki_agent_protocol_active_streams",
+			Help: "Currently active streaming protocol requests.",
+		}, []string{"protocol"}),
+		llmTokens: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "liki_agent_llm_tokens_total",
+			Help: "LLM tokens by model and token type.",
+		}, []string{"model", "type"}),
+		llmCalls: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "liki_agent_llm_calls_total",
+			Help: "LLM calls by model and status.",
+		}, []string{"model", "status"}),
+		dependencyUp: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "liki_agent_dependency_up",
+			Help: "Whether a runtime dependency is ready.",
+		}, []string{"dependency"}),
+	}
+	registry.MustRegister(
+		metrics.protocolRequests,
+		metrics.protocolLatency,
+		metrics.activeStreams,
+		metrics.llmTokens,
+		metrics.llmCalls,
+		metrics.dependencyUp,
+	)
+	return metrics
+}
+
+func (m *Metrics) Handler() http.Handler {
+	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
+}
+
+func (m *Metrics) ObserveHTTPRequest(protocol, operation, status string, duration time.Duration) {
+	m.protocolRequests.WithLabelValues(protocol, operation, status).Inc()
+	m.protocolLatency.WithLabelValues(protocol, operation).Observe(duration.Seconds())
+}
+
+func (m *Metrics) ObserveLLMCall(model, status string, promptTokens, completionTokens, totalTokens int64) {
+	m.llmCalls.WithLabelValues(model, status).Inc()
+	m.llmTokens.WithLabelValues(model, "prompt").Add(float64(promptTokens))
+	m.llmTokens.WithLabelValues(model, "completion").Add(float64(completionTokens))
+	m.llmTokens.WithLabelValues(model, "thought").Add(float64(0))
+	m.llmTokens.WithLabelValues(model, "total").Add(float64(totalTokens))
+}
+
+func (m *Metrics) StreamOpened(protocol string) {
+	m.activeStreams.WithLabelValues(protocol).Inc()
+}
+
+func (m *Metrics) StreamClosed(protocol string) {
+	m.activeStreams.WithLabelValues(protocol).Dec()
+}
+
+func (m *Metrics) SetDependencyReady(name string, ready bool) {
+	value := 0.0
+	if ready {
+		value = 1
+	}
+	m.dependencyUp.WithLabelValues(name).Set(value)
+}

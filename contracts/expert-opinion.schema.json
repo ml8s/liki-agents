@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://liki.hk/contracts/expert-opinion-v1.json",
+  "title": "ExpertOpinion",
+  "type": "object",
+  "required": ["expert", "system", "conclusion", "confidence", "created_at"],
+  "properties": {
+    "expert": { "type": "string", "minLength": 1 },
+    "system": { "type": "string", "minLength": 1 },
+    "school": { "type": "string" },
+    "topic": { "type": "string" },
+    "conclusion": { "type": "string", "minLength": 1 },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "supporting_factors": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "limitations": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "source_tools": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": false
+}

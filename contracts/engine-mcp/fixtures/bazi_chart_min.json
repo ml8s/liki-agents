@@ -1,0 +1,10 @@
+{
+  "tool": "bazi_chart",
+  "arguments": {
+    "birth": {
+      "time": "1984-02-15T08:00:00+08:00",
+      "longitude": 116.4
+    },
+    "gender": "male"
+  }
+}
