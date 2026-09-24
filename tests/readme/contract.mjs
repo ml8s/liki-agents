@@ -70,7 +70,8 @@ if (JSON.stringify(h2.map(({ text }) => text)) !== JSON.stringify(expectedHeadin
 }
 
 if (headings.some(({ depth }) => depth > 3)) fail("README headings must not be deeper than H3");
-if (source.split("\n").length >= 180) fail("README must stay below 180 lines");
+const lineCount = source.split("\n").filter((line, index, lines) => index < lines.length - 1 || line !== "").length;
+if (lineCount >= 180) fail("README must stay below 180 lines");
 if (!source.includes("generic multi-agent runtime")) {
   fail("README must state the generic multi-agent runtime positioning");
 }

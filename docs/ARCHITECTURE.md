@@ -117,6 +117,8 @@ on `/readyz`.
 AG-UI decodes the official `RunAgentInput` and emits official SSE events. The
 supported profile is text chat; unsupported capabilities are rejected rather
 than silently ignored.
+Official clients may send an absent, null, or empty `state` value; the stateless
+runtime ignores it. Non-empty client state is rejected with a stable error code.
 
 Event mapping:
 

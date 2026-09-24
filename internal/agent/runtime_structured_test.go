@@ -92,7 +92,7 @@ func TestRunStateRejectsInvalidStructuredOutput(t *testing.T) {
 	}
 }
 
-func TestVisibleEventFiltersObserverFacts(t *testing.T) {
+func TestEventProjectorFiltersObserverFacts(t *testing.T) {
 	toolCall := &genai.Part{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "test_tool"}}
 	testCases := []struct {
 		name    string
@@ -111,15 +111,16 @@ func TestVisibleEventFiltersObserverFacts(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			visible := visibleEvent(testCase.event)
+			projector := newEventProjector(NewTestDeployment(t))
+			visible, visibleOK := projector.Project(testCase.event)
 			if testCase.wantNil {
-				if visible != nil {
-					t.Fatalf("visible event = %+v, want nil", visible)
+				if visibleOK {
+					t.Fatalf("visible event = %+v, want none", visible)
 				}
 				return
 			}
-			if visible == nil || len(visible.Content.Parts) != 1 || visible.Content.Parts[0].FunctionCall == nil {
-				t.Fatalf("visible event = %+v, want one function call", visible)
+			if !visibleOK || visible == nil || len(visible.Content.Parts) != 1 || visible.Content.Parts[0].FunctionCall == nil {
+				t.Fatalf("visible event = %+v/%v, want one function call", visible, visibleOK)
 			}
 		})
 	}

@@ -25,7 +25,7 @@
   <h1>liki-agents development chat</h1>
   <form>
     <div class="settings">
-      <input id="token" type="password" placeholder="Internal bearer token" autocomplete="off" required>
+      <input id="token" type="password" placeholder="Internal bearer token (optional in dev)" autocomplete="off">
       <input id="userId" type="text" placeholder="User ID" value="local-chat" autocomplete="off" required>
       <input id="threadId" type="text" placeholder="Thread ID" autocomplete="off" required>
     </div>
@@ -99,7 +99,7 @@
       let assistant;
       const agent = new HttpAgent({
         headers: {
-          Authorization: `Bearer ${token.value}`,
+          ...(token.value ? { Authorization: `Bearer ${token.value}` } : {}),
           "X-Liki-User-ID": userId.value,
         },
         initialMessages: structuredClone(history),

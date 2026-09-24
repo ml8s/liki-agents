@@ -23,11 +23,11 @@ is written to `bin/liki-agents`.
 
 ## Quick start
 
-Copy `.env.example` to `.env`, then set the internal service token, model API
-key, and Engine MCP endpoint. Run the runtime in the foreground:
+Copy `.env.example` to `.env`, then set the model API key and Engine MCP
+endpoint. Local development may leave the internal token empty to disable
+bearer authentication. Run the runtime in the foreground:
 
 ```text
-LIKI_AGENTS_INTERNAL_TOKEN=<internal service token>
 LIKI_LLM_API_KEY=<model provider API key>
 LIKI_ENGINE_MCP_URL=<Engine MCP endpoint>
 ```
@@ -74,7 +74,7 @@ There is no private application API and no ADK Launcher control plane.
 
 ## Security boundary
 
-All protocol calls require the internal service token:
+Production protocol calls require the internal service token:
 
 ```text
 Authorization: Bearer <LIKI_AGENTS_INTERNAL_TOKEN>
@@ -90,6 +90,9 @@ X-Liki-User-ID: <verified user id>
 The runtime does not expose itself directly to the public internet, authenticate
 end users, issue sessions, store product conversations, or trust unverified
 browser identities.
+
+Local development may leave `LIKI_AGENTS_INTERNAL_TOKEN` empty. Bearer
+authentication is then disabled, but AG-UI still requires `X-Liki-User-ID`.
 
 Engine access is allowlisted per Agent. Logs, traces, and audit records do not
 contain prompts, raw model output, or tool payloads.

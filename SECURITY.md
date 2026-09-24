@@ -5,7 +5,8 @@ public internet.
 
 Required controls:
 
-- Internal bearer token between the gateway and `liki-agents`.
+- Internal bearer token between the gateway and `liki-agents` outside local
+  development.
 - Verified user context supplied by the gateway for AG-UI.
 - Explicit per-Agent MCP tool allowlists.
 - No secrets, prompts, raw model output, or tool payloads in logs.

@@ -433,6 +433,7 @@ func (r *Runtime) Run(
 		capturePlain:   !r.entrypoint.Output.Structured(),
 		plainAgentName: r.entrypoint.Name,
 	}
+	projector := newEventProjector(r.definition)
 	// Session identity is run-scoped. Thread identity remains owned by the
 	// application database, preventing implicit duplication of durable history.
 	sessionID := "run:" + request.RunID
@@ -506,7 +507,7 @@ func (r *Runtime) Run(
 		}
 		state.consume(event)
 		if observe != nil {
-			if visible := visibleEvent(event); visible != nil {
+			if visible, visibleOK := projector.Project(event); visibleOK {
 				if err := observe(visible); err != nil {
 					runSpan.RecordError(err)
 					runSpan.SetStatus(codes.Error, runtimeError(err).Error())
@@ -614,11 +615,6 @@ func (r *Runtime) loadStructuredAnalysis(ctx context.Context, request RunRequest
 	}
 	return state.consumeStructuredOutput(value, r.entrypoint)
 }
-
-// visibleEvent strips model-generated structured payload text before native
-// events cross the runtime boundary. In the structured-output graph, model
-// text is protocol payload (JSON), never user-facing message content. Function
-// call and response facts remain visible to protocol adapters.
 
 // Entrypoint exposes the selected AgentDefinition to protocol adapters.
 func (r *Runtime) Entrypoint() *AgentDefinition {

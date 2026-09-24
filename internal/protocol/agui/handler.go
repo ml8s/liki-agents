@@ -114,7 +114,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	streamer := &stream{
 		runID:      runID,
-		messageID:  runID + ":assistant",
 		entrypoint: h.entrypoint,
 	}
 	spec := agent.RunRequest{
@@ -156,11 +155,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // stream converts framework-native execution facts into official AG-UI events.
 // It owns no alternative runtime or business state.
 type stream struct {
-	runID      string
-	messageID  string
-	entrypoint string
-	subagents  []*subagentActivation
-	nextID     int
+	runID           string
+	entrypoint      string
+	subagents       []*subagentActivation
+	nextID          int
+	messageSequence int
+	textMessageID   string
+	textActive      bool
+	streamedText    bool
 }
 
 type subagentActivation struct {
@@ -177,8 +179,20 @@ func (s *stream) consume(event *session.Event, emit func(aguievents.Event) error
 		return nil
 	}
 	for _, part := range event.Content.Parts {
+		if part == nil || part.Text == "" || part.Thought {
+			continue
+		}
+		if err := s.emitTextDelta(part.Text, emit); err != nil {
+			return err
+		}
+	}
+
+	for _, part := range event.Content.Parts {
 		if part == nil || part.FunctionCall == nil {
 			continue
+		}
+		if err := s.closeText(emit); err != nil {
+			return err
 		}
 		call := part.FunctionCall
 		callID := protocolToolID(s.runID, call.Name, call.ID)
@@ -203,12 +217,15 @@ func (s *stream) consume(event *session.Event, emit func(aguievents.Event) error
 			continue
 		}
 		response := part.FunctionResponse
+		if err := s.closeText(emit); err != nil {
+			return err
+		}
 		responseID := protocolToolID(s.runID, response.Name, response.ID)
 		payload, err := json.Marshal(response.Response)
 		if err != nil || len(payload) == 0 || string(payload) == "null" {
 			payload = []byte("{}")
 		}
-		if err := emit(aguievents.NewToolCallResultEvent(s.messageID, responseID, string(payload))); err != nil {
+		if err := emit(aguievents.NewToolCallResultEvent(s.runID+":tools", responseID, string(payload))); err != nil {
 			return err
 		}
 		if err := emit(aguievents.NewToolCallEndEvent(responseID)); err != nil {
@@ -225,17 +242,55 @@ func (s *stream) finish(content string, emit func(aguievents.Event) error) error
 	if err := s.finishSubagents(emit); err != nil {
 		return err
 	}
+	if err := s.closeText(emit); err != nil {
+		return err
+	}
+	if s.streamedText {
+		return nil
+	}
 	content = strings.TrimSpace(content)
 	if content == "" {
 		return nil
 	}
-	if err := emit(aguievents.NewTextMessageStartEvent(s.messageID, aguievents.WithRole(string(aguitypes.RoleAssistant)))); err != nil {
+	if err := s.openText(emit); err != nil {
 		return err
 	}
-	if err := emit(aguievents.NewTextMessageContentEvent(s.messageID, content)); err != nil {
+	if err := emit(aguievents.NewTextMessageContentEvent(s.textMessageID, content)); err != nil {
 		return err
 	}
-	return emit(aguievents.NewTextMessageEndEvent(s.messageID))
+	return s.closeText(emit)
+}
+
+func (s *stream) openText(emit func(aguievents.Event) error) error {
+	if s.textActive {
+		return nil
+	}
+	s.messageSequence++
+	s.textMessageID = fmt.Sprintf("%s:assistant:%d", s.runID, s.messageSequence)
+	s.textActive = true
+	s.streamedText = true
+	return emit(aguievents.NewTextMessageStartEvent(
+		s.textMessageID,
+		aguievents.WithRole(string(aguitypes.RoleAssistant)),
+	))
+}
+
+func (s *stream) emitTextDelta(delta string, emit func(aguievents.Event) error) error {
+	if err := s.openText(emit); err != nil {
+		return err
+	}
+	return emit(aguievents.NewTextMessageContentEvent(s.textMessageID, delta))
+}
+
+func (s *stream) closeText(emit func(aguievents.Event) error) error {
+	if !s.textActive {
+		return nil
+	}
+	if err := emit(aguievents.NewTextMessageEndEvent(s.textMessageID)); err != nil {
+		return err
+	}
+	s.textActive = false
+	return nil
 }
 
 func (s *stream) observeSubagent(event *session.Event, emit func(aguievents.Event) error) error {
@@ -345,7 +400,7 @@ func validateTextChatProfile(input aguitypes.RunAgentInput) error {
 	if input.ParentRunID != nil {
 		return fmt.Errorf("parent runs are outside the AG-UI text-chat profile")
 	}
-	if input.State != nil {
+	if !isEmptyClientState(input.State) {
 		return fmt.Errorf("client state is outside the AG-UI text-chat profile")
 	}
 	if len(input.Tools) != 0 {
@@ -368,6 +423,22 @@ func validateTextChatProfile(input aguitypes.RunAgentInput) error {
 		}
 	}
 	return nil
+}
+
+func isEmptyClientState(state any) bool {
+	if state == nil {
+		return true
+	}
+	switch value := state.(type) {
+	case map[string]any:
+		return len(value) == 0
+	case []any:
+		return len(value) == 0
+	case string:
+		return value == ""
+	default:
+		return false
+	}
 }
 
 func lastUserConversation(messages []aguitypes.Message) (string, []agent.Message, error) {

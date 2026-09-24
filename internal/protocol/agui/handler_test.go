@@ -2,6 +2,7 @@ package agui_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -98,10 +99,10 @@ func TestAGUIRejectsUnsupportedCapabilitiesInsteadOfDroppingThem(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 	cases := map[string]string{
-		"client tools":   `{"threadId":"t","runId":"r","messages":[{"id":"m","role":"user","content":"hi"}],"tools":[{"name":"x","description":"x","parameters":{}}]}`,
-		"client state":   `{"threadId":"t","runId":"r","messages":[{"id":"m","role":"user","content":"hi"}],"state":{"step":1}}`,
-		"system history": `{"threadId":"t","runId":"r","messages":[{"id":"s","role":"system","content":"rules"},{"id":"m","role":"user","content":"hi"}]}`,
-		"multimodal":     `{"threadId":"t","runId":"r","messages":[{"id":"m","role":"user","content":[{"type":"image","url":"https://example.test/a.png"}]}]}`,
+		"client tools":           `{"threadId":"t","runId":"r","messages":[{"id":"m","role":"user","content":"hi"}],"tools":[{"name":"x","description":"x","parameters":{}}]}`,
+		"non-empty client state": `{"threadId":"t","runId":"r","messages":[{"id":"m","role":"user","content":"hi"}],"state":{"step":1}}`,
+		"system history":         `{"threadId":"t","runId":"r","messages":[{"id":"s","role":"system","content":"rules"},{"id":"m","role":"user","content":"hi"}]}`,
+		"multimodal":             `{"threadId":"t","runId":"r","messages":[{"id":"m","role":"user","content":[{"type":"image","url":"https://example.test/a.png"}]}]}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -111,6 +112,87 @@ func TestAGUIRejectsUnsupportedCapabilitiesInsteadOfDroppingThem(t *testing.T) {
 				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 			}
 		})
+	}
+}
+
+func TestAGUIAcceptsStandardEmptyClientState(t *testing.T) {
+	scripted := &scriptedRuntime{
+		result: agent.RunResult{Text: "ready"},
+	}
+	handler, err := agui.New(scripted, agui.Config{RunTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := map[string]string{
+		"absent": "",
+		"null":   `"state":null,`,
+		"empty":  `"state":{},`,
+	}
+	for name, state := range states {
+		t.Run(name, func(t *testing.T) {
+			template := `{
+				"threadId":"t",
+				"runId":"r",
+				%s
+				"messages":[{"id":"m","role":"user","content":"hi"}]
+			}`
+			var body string
+			if state == "" {
+				body = fmt.Sprintf(template, "")
+			} else {
+				body = fmt.Sprintf(template, state)
+			}
+			request := authenticatedRequest(t, body)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+			for _, kind := range []string{"RUN_STARTED", "TEXT_MESSAGE_CONTENT", "RUN_FINISHED"} {
+				if !strings.Contains(response.Body.String(), kind) {
+					t.Fatalf("missing %s in SSE body: %s", kind, response.Body.String())
+				}
+			}
+			if strings.Contains(response.Body.String(), "unsupported_agui_feature") {
+				t.Fatal("standard empty client state was rejected")
+			}
+		})
+	}
+}
+
+func TestAGUIStreamsPartialTextDeltas(t *testing.T) {
+	events := []*session.Event{
+		{LLMResponse: model.LLMResponse{Partial: true, Content: &genai.Content{
+			Parts: []*genai.Part{{Text: "Hello "}},
+		}}},
+		{LLMResponse: model.LLMResponse{Partial: true, Content: &genai.Content{
+			Parts: []*genai.Part{{Text: "streaming"}},
+		}}},
+	}
+	scripted := &scriptedRuntime{
+		events: events,
+		result: agent.RunResult{Text: "Hello streaming"},
+	}
+	handler, err := agui.New(scripted, agui.Config{RunTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := authenticatedRequest(t, `{"threadId":"t","runId":"r","messages":[{"id":"m","role":"user","content":"hi"}]}`)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	body := response.Body.String()
+	if got := strings.Count(body, `"type":"TEXT_MESSAGE_START"`); got != 1 {
+		t.Fatalf("TEXT_MESSAGE_START count = %d, want 1", got)
+	}
+	if got := strings.Count(body, `"type":"TEXT_MESSAGE_CONTENT"`); got != 2 {
+		t.Fatalf("TEXT_MESSAGE_CONTENT count = %d, want 2", got)
+	}
+	if got := strings.Count(body, `"type":"TEXT_MESSAGE_END"`); got != 1 {
+		t.Fatalf("TEXT_MESSAGE_END count = %d, want 1", got)
+	}
+	if !strings.Contains(body, `"delta":"Hello "`) || !strings.Contains(body, `"delta":"streaming"`) {
+		t.Fatalf("SSE body missing streamed deltas: %s", body)
 	}
 }
 
