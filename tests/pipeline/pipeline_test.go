@@ -3,6 +3,7 @@ package pipeline_test
 import (
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -45,5 +46,24 @@ func TestGitHubWorkflowExecutesGateAndBuild(t *testing.T) {
 	}
 	if !strings.Contains(workflow, "run: make build") {
 		t.Fatal("CI workflow does not build the production binary")
+	}
+}
+
+func TestGitHubWorkflowInstallsNodeDependenciesBeforeGate(t *testing.T) {
+	raw, err := os.ReadFile("../../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatalf("read GitHub workflow: %v", err)
+	}
+	lines := strings.Split(string(raw), "\n")
+	installIndex := slices.Index(lines, "      - name: Install Node dependencies")
+	gateIndex := slices.Index(lines, "      - name: Run pre-push gate")
+	if installIndex < 0 || gateIndex < 0 {
+		t.Fatalf("Node install or gate step missing; install=%d gate=%d", installIndex, gateIndex)
+	}
+	if installIndex > gateIndex {
+		t.Fatal("Node dependencies must be installed before the gate")
+	}
+	if !slices.Contains(lines[installIndex:gateIndex], "        run: npm ci") {
+		t.Fatal("Node install step must use reproducible npm ci")
 	}
 }

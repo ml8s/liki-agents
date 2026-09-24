@@ -29,6 +29,8 @@ jobs:
         with:
           node-version: 18
           cache: npm
+      - name: Install Node dependencies
+        run: npm ci
       - name: Run pre-push gate
         run: make gate
       - name: Build
