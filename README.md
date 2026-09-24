@@ -1,141 +1,176 @@
-# liki-agent
+# Liki Agents
 
-`liki-agent` is a standalone destiny-analysis agent runtime. It exposes the
-standard A2A and AG-UI protocols and executes one shared ADK graph.
-
-```text
-server client ──A2A──────┐
-                         ↓
-liki-web ──AG-UI SSE→ liki-agent ──MCP→ liki-engine
-```
-
-`liki-web` owns users, authentication, products, payments, entitlements,
-quota, and abuse control. `liki-agent` owns agent execution, model
-orchestration, safety policy, and the LLM call audit ledger. It does not own
-commerce, user accounts, conversation-as-a-product storage, or deterministic
-destiny computation.
-
-## Public surface
+`liki-agents` is a generic multi-agent runtime for externally defined
+`AgentDeployment` artifacts. It executes an ADK Agent tree, orchestrates model
+calls and MCP tools, and exposes standard machine and browser protocols.
 
 ```text
-GET  /.well-known/agent-card.json
-POST /a2a
-POST /ag-ui
-
-GET  /healthz
-GET  /readyz
-GET  /version
-GET  /metrics
+machine client ──A2A JSON-RPC──┐
+                               ↓
+liki-web ──AG-UI SSE→ liki-agents ──MCP→ Engine / tools
 ```
 
-There is no private `/v1` application API.
+The runtime is domain-neutral. Deployments provide instructions, output
+contracts, delegation topology, and tool allowlists. `liki-agents` provides
+execution, protocol adaptation, security boundaries, evidence, and
+observability.
 
-## Runtime
+## Install
 
-- Google ADK Go v2 single-expert graph.
-- OpenAI-compatible model provider.
-- Engine MCP Streamable HTTP toolset with an allowlist.
-- Structured output: answer, confidence, topic, key factors, and limitations.
-- Prompt and policy versions attached to expert opinions and LLM audit rows.
-- Run-scoped in-memory ADK session state.
-- SQLite is audit-only: `agent_llm_calls`.
+Requires Go 1.26+, Docker Compose for container development, and Node.js 18+
+for documentation checks. Clone the repository and run `make build`; the binary
+is written to `bin/liki-agents`.
 
-## Standard protocols
+## Quick start
 
-| Protocol | Consumer | Purpose |
-|---|---|---|
-| A2A | server or Agent client | discovery, tasks, artifacts, cancel, streaming |
-| AG-UI | gateway/frontend | browser-facing run and UI event stream |
-| MCP | liki-agent | deterministic Engine tools |
+Copy `.env.example` to `.env`, then set the internal service token, model API
+key, and Engine MCP endpoint. Run the runtime in the foreground:
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
-[`docs/DOMAIN.md`](docs/DOMAIN.md).
+```text
+LIKI_AGENTS_INTERNAL_TOKEN=<internal service token>
+LIKI_LLM_API_KEY=<model provider API key>
+LIKI_ENGINE_MCP_URL=<Engine MCP endpoint>
+```
+
+Run the runtime in the foreground:
+
+```bash
+make run
+curl -sS http://127.0.0.1:8083/readyz | jq
+```
+
+`make run` does not start Engine MCP. For browser-style local testing, run
+`scripts/dev-chat-ui.sh` and open <http://127.0.0.1:8084>. That UI is
+development-only.
+
+## Runtime model
+
+An `AgentDeployment` is the sole source of Agent behavior and topology. Each
+Agent has a description, ADK mode, external instruction file, optional output
+contract, and explicit `tools.allow`. The unique Agent with no incoming
+`sub_agents` edge is the entrypoint. ADK owns delegation and execution.
+
+Prompts are external instruction files. Plain text is the default output. For
+typed machine-to-machine output, an Agent may declare both a JSON Schema and a
+JSON Pointer to the user-facing string. Tool access is denied unless the tool is
+listed in that Agent's `tools.allow`.
+
+The artifact is validated against
+[`contracts/agent-definition.schema.json`](contracts/agent-definition.schema.json).
+Its digest covers the manifest, referenced instruction and schema files, and the
+ADK graph semantics.
+
+## Protocols
+
+| Consumer | Protocol | Endpoint | Purpose |
+|---|---|---|---|
+| Machine client | A2A JSON-RPC | `POST /a2a` | discovery, invocation, streaming |
+| Browser / gateway | AG-UI SSE | `POST /ag-ui` | chat, tool events, sub-agent lifecycle |
+| Machine discovery | A2A Agent Card | `GET /.well-known/agent-card.json` | standard capability metadata |
+| Tool server | MCP Streamable HTTP | outbound | deterministic tools |
+
+Operational endpoints are `/healthz`, `/readyz`, `/version`, and `/metrics`.
+There is no private application API and no ADK Launcher control plane.
 
 ## Security boundary
 
-`liki-agent` is an internal service. Production requires:
+All protocol calls require the internal service token:
 
 ```text
-Authorization: Bearer <LIKI_AGENT_INTERNAL_TOKEN>
+Authorization: Bearer <LIKI_AGENTS_INTERNAL_TOKEN>
 ```
 
-For AG-UI, `liki-web` must authenticate the browser and inject:
+AG-UI additionally requires `liki-web` to authenticate the browser user and
+inject:
 
 ```text
 X-Liki-User-ID: <verified user id>
 ```
 
-`liki-agent` rejects AG-UI requests without that verified identity. It does not
-issue user sessions or trust an unauthenticated browser request.
+The runtime does not expose itself directly to the public internet, authenticate
+end users, issue sessions, store product conversations, or trust unverified
+browser identities.
+
+Engine access is allowlisted per Agent. Logs, traces, and audit records do not
+contain prompts, raw model output, or tool payloads.
 
 ## Configuration
 
-Copy `.env.example` to `.env`. The required production settings are the public
-URL, internal service token, LLM API key, SQLite path, Engine MCP URL, and
-Engine tool allowlist. `.env.example` is the complete current configuration
-surface.
+`.env.example` is the complete configuration surface. Important groups are:
 
-For Zhipu / BigModel, use:
+| Prefix / variable | Purpose |
+|---|---|
+| `LIKI_AGENTS_*` | service address, token, data path, deployment artifact |
+| `LIKI_DB_PATH` | SQLite audit database |
+| `LIKI_ENGINE_*` | external MCP endpoint, token, timeout, contract version |
+| `LIKI_LLM_*` | OpenAI-compatible model provider |
+| `LIKI_LOG_*` | structured logging |
+| `OTEL_*` | standard OpenTelemetry tracing settings |
+
+Use an empty `LIKI_LLM_STRUCTURED_OUTPUT` for plain-text deployments. Use
+`json_schema` for providers with native strict JSON Schema support and
+`json_object` for provider-safe JSON mode.
+
+## Operations
+
+Use `make run` for the host process and `make dev` for the containerized
+development service. Both run in the foreground and stop with `Ctrl-C`.
+`make dev-down` removes the Compose workload; `make db-backup` creates an
+online SQLite backup.
+
+## Observability
+
+Prometheus exposes protocol latency, active streams, model calls and tokens,
+tool calls and durations, delegation activity, and dependency readiness. Logs
+use `log/slog` with stable event names. Distributed tracing uses W3C context
+propagation and standard OTLP export. Tracing is disabled unless a standard
+OTLP endpoint is configured:
 
 ```text
-LIKI_LLM_BASE_URL=https://open.bigmodel.cn/api/v1
-LIKI_LLM_PROVIDER=zhipu
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://otel-collector:4318/v1/traces
 ```
 
-## Local run
+SQLite stores append-only audit events with execution metadata, versions,
+digests, duration, and stable error codes. Audit records do not store
+conversation or domain payloads.
 
-Start the Engine MCP:
+## Documentation
 
-```bash
-make dev-up
-```
+| Document | Purpose |
+|---|---|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | runtime architecture and protocol mapping |
+| [`docs/DOMAIN.md`](docs/DOMAIN.md) | stable runtime domain invariants |
+| [`contracts/agent-definition.schema.json`](contracts/agent-definition.schema.json) | deployment contract |
+| [`SECURITY.md`](SECURITY.md) | security policy and required controls |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | development workflow and review gate |
+| [`LICENSE`](LICENSE) | open-source license |
 
-Configure and run the agent:
+## Development
 
-```bash
-cp .env.example .env
-make run
-```
-
-Check readiness:
-
-```bash
-curl -sS http://127.0.0.1:8083/readyz | jq
-```
-
-## Checks
+Run static checks, artifact validation, race tests, and build:
 
 ```bash
 make check
-```
-
-Run isolated tests:
-
-```bash
+make validate
 make test
-```
-
-Run the pre-push gate:
-
-```bash
 make gate
+make build
 ```
 
-`make gate` runs static checks and isolated tests for pre-push. It does not
-consume real LLM usage or require a deployed Engine.
+`make gate` is the pre-push gate. It runs documentation linting, Go static
+checks, isolated race tests, and deployment validation. It does not call a real
+model provider or require Engine MCP.
 
-Validate the deployed Engine contract separately:
+Documentation checks use `markdownlint-cli2` and a `remark-parse` AST contract.
+The Node dependencies are development-only.
 
-```bash
-make contract
-```
+## Project boundary
 
-SQLite-specific checks:
+`liki-agents` is not an Agent management control plane. It does not provide
+Agent CRUD APIs, deployment registries, tenant management, quota enforcement,
+approval workflows, or a management console.
 
-```bash
-make test-db
-```
-
-GitHub Actions runs `make gate` and `make build` on pushes to `main` and pull
-requests. Engine contract checks stay local or deployment-specific because they
-require the Engine MCP endpoint.
+`liki-web` owns users, products, entitlements, quotas, and durable product
+conversations. A Liki domain release owns prompts, skills, workflow policy, and
+tool semantics. Engine owns deterministic tool implementations exposed through
+MCP.

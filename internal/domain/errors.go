@@ -5,8 +5,6 @@ import "errors"
 var (
 	ErrNotFound     = errors.New("resource not found")
 	ErrInvalidInput = errors.New("invalid input")
-	ErrForbidden    = errors.New("forbidden")
-	ErrConflict     = errors.New("conflict")
 )
 
 type Error struct {

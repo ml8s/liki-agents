@@ -1,0 +1,20 @@
+{
+  "apiVersion": "agent.liki/v1",
+  "kind": "AgentDeployment",
+  "metadata": {
+    "name": "liki-agents-deployment",
+    "version": "1.0.0"
+  },
+  "spec": {
+    "agents": [
+      {
+        "name": "main",
+        "version": "1.0.0",
+        "description": "Generic development agent",
+        "mode": "chat",
+        "instruction": { "path": "instruction.md" },
+        "tools": { "allow": [] }
+      }
+    ]
+  }
+}

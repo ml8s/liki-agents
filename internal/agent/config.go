@@ -4,35 +4,32 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/ml8s/liki-agents/internal/audit"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/adk/v2/model"
 )
 
 type Config struct {
 	AppName          string
-	AgentName        string
-	AgentDescription string
-	ExpertName       string
-	System           string
 	Model            string
 	ModelBaseURL     string
 	ModelAPIKey      string
 	ModelTimeout     time.Duration
 	Temperature      float64
-	LLMRecorder      LLMCallRecorder
+	AuditRecorder    audit.Recorder
 	Metrics          Metrics
 	Provider         string
-	Env              string
+	StructuredOutput string
 	ContractVersion  string
 	GraphVersion     string
-	PromptVersion    string
-	PolicyVersion    string
-	AllowedTools     []string
+	Deployment       *Deployment
 	EngineMCPURL     string
 	EngineToken      string
 	EngineTimeout    time.Duration
 	Now              func() time.Time
 	Logger           *slog.Logger
+	TracerProvider   trace.TracerProvider
 
 	// modelOverride is an internal test seam. Production builds always
 	// construct the OpenAI-compatible provider in NewRuntime.

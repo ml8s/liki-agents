@@ -5,10 +5,6 @@ package domain
 // Codes are grouped by the layer that raises them.
 const (
 	// Domain validation codes (internal/domain)
-	CodeExpertRequired           = "expert_required"
-	CodeSystemRequired           = "system_required"
-	CodeConclusionRequired       = "conclusion_required"
-	CodeInvalidConfidence        = "invalid_confidence"
 	CodeLLMCallIDRequired        = "llm_call_id_required"
 	CodeRunIDRequired            = "run_id_required"
 	CodeThreadIDRequired         = "thread_id_required"
@@ -20,11 +16,26 @@ const (
 
 	// Runtime initialization codes (internal/agent constructor)
 	CodeLLMModelMissing        = "llm_model_missing"
-	CodeEngineToolsEmpty       = "engine_tools_empty"
 	CodeEngineMCPURLMissing    = "engine_mcp_url_missing"
 	CodeLLMUnavailable         = "llm_unavailable"
 	CodeRuntimeInitFailed      = "runtime_init_failed"
 	CodeEngineToolsUnavailable = "engine_tools_unavailable"
+	CodeToolCallIDRequired     = "tool_call_id_required"
+	CodeToolNameRequired       = "tool_name_required"
+	CodeToolStartedAtRequired  = "tool_started_at_required"
+	CodeToolFinishedAtRequired = "tool_finished_at_required"
+	CodeToolDurationInvalid    = "tool_duration_invalid"
+	CodeToolCallInvalid        = "tool_call_invalid"
+	CodeToolCallUnknown        = "tool_call_unknown"
+	CodeToolProvenanceInvalid  = "tool_provenance_invalid"
+	CodeToolExecutionFailed    = "tool_execution_failed"
+	CodeToolExecutionInterrupted
+	CodeDelegationUnknown                 = "agent_delegation_unknown"
+	CodeDelegationFailed                  = "agent_delegation_failed"
+	CodeAuditRecorderMissing              = "audit_recorder_missing"
+	CodeAgentDefinitionMissing            = "agent_definition_missing"
+	CodeAgentDefinitionInvalid            = "agent_definition_invalid"
+	CodeStructuredOutputCapabilityInvalid = "structured_output_capability_invalid"
 
 	// Runtime execution codes (internal/agent Run / audit)
 	CodeRuntimeCancelled          = "runtime_cancelled"
@@ -53,8 +64,7 @@ const (
 	CodeInvalidAGUIMessage     = "invalid_agui_message"
 )
 
-// Chat Completions model codes (internal/agent/chat_model.go)
+// Structured output model adapter codes (internal/agent/structured_output.go)
 const (
-	CodeLLMRequestInvalid  = "llm_request_invalid"
-	CodeLLMResponseInvalid = "llm_response_invalid"
+	CodeLLMRequestInvalid = "llm_request_invalid"
 )

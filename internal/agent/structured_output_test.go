@@ -7,9 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/liki/liki-agent/internal/domain"
+	"github.com/ml8s/liki-agents/internal/domain"
 	"google.golang.org/adk/v2/model"
-	"google.golang.org/adk/v2/session"
 	"google.golang.org/genai"
 )
 
@@ -35,18 +34,23 @@ func TestJSONObjectModelKeepsOneStructuredContractOnJSONMode(t *testing.T) {
 	inner := &capturingLLM{response: &model.LLMResponse{
 		Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "{}"}}},
 	}}
-	adapter, err := newJSONObjectModel(inner, structuredOutputSchema())
+	deployment := NewTestDeployment(t)
+	entrypoint, err := deployment.EntrypointDefinition()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := newJSONObjectModel(inner)
 	if err != nil {
 		t.Fatalf("newJSONObjectModel() error = %v", err)
 	}
 	if adapter.Name() != inner.Name() {
 		t.Fatalf("Name() = %q, want %q", adapter.Name(), inner.Name())
 	}
-	schema := structuredOutputSchema()
+	schema := entrypoint.GenaiOutputSchema
 	request := &model.LLMRequest{
 		Model: "glm-5.3-flash",
 		Config: &genai.GenerateContentConfig{
-			SystemInstruction: genai.NewContentFromText("You are a destiny analyst.", systemRole),
+			SystemInstruction: genai.NewContentFromText("You are a generic test agent.", systemRole),
 			ResponseSchema:    schema,
 			ResponseMIMEType:  "application/json",
 		},
@@ -79,35 +83,72 @@ func TestJSONObjectModelKeepsOneStructuredContractOnJSONMode(t *testing.T) {
 	if adapted.Config.ResponseMIMEType != "application/json" {
 		t.Fatalf("response MIME type = %q, want application/json", adapted.Config.ResponseMIMEType)
 	}
-	instruction := textFromContent(adapted.Config.SystemInstruction)
-	if !strings.Contains(instruction, "You are a destiny analyst.") {
-		t.Fatal("existing system instruction was lost")
-	}
-	for _, marker := range []string{"answer", "confidence", "topic", "key_factors", "limitations"} {
-		if !strings.Contains(instruction, marker) {
-			t.Fatalf("injected schema missing %q: %q", marker, instruction)
+	var instruction strings.Builder
+	for _, part := range adapted.Config.SystemInstruction.Parts {
+		if part != nil && part.Text != "" {
+			instruction.WriteString(part.Text)
 		}
 	}
-	if !strings.Contains(instruction, structuredOutputInstructionPrefix) {
+	if !strings.Contains(instruction.String(), "You are a generic test agent.") {
+		t.Fatal("existing system instruction was lost")
+	}
+	for _, marker := range []string{"answer"} {
+		if !strings.Contains(instruction.String(), marker) {
+			t.Fatalf("injected schema missing %q: %q", marker, instruction.String())
+		}
+	}
+	if !strings.Contains(instruction.String(), structuredOutputInstructionPrefix) {
 		t.Fatal("JSON-only output instruction was not injected")
 	}
 }
 
+func TestJSONObjectModelLeavesPlainRequestUnchanged(t *testing.T) {
+	inner := &capturingLLM{response: &model.LLMResponse{
+		Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "hello"}}},
+	}}
+	adapter, err := newJSONObjectModel(inner)
+	if err != nil {
+		t.Fatalf("newJSONObjectModel() error = %v", err)
+	}
+	config := &genai.GenerateContentConfig{
+		SystemInstruction: genai.NewContentFromText("You are a generic test agent.", systemRole),
+	}
+	request := &model.LLMRequest{Model: "glm-5.3-flash", Config: config}
+	for _, err := range adapter.GenerateContent(context.Background(), request, false) {
+		if err != nil {
+			t.Fatalf("GenerateContent() error = %v", err)
+		}
+	}
+	if inner.request != request {
+		t.Fatal("plain request was copied or changed")
+	}
+	if inner.request.Config.ResponseMIMEType == "application/json" {
+		t.Fatal("plain request was converted to JSON mode")
+	}
+	if strings.Contains(inner.request.Config.SystemInstruction.Parts[len(inner.request.Config.SystemInstruction.Parts)-1].Text, structuredOutputInstructionPrefix) {
+		t.Fatal("schema instruction was injected without a response schema")
+	}
+}
+
 func TestJSONObjectModelRejectsInvalidConstruction(t *testing.T) {
-	schema := structuredOutputSchema()
 	validModel := &capturingLLM{}
 	testCases := []struct {
 		name    string
 		inner   model.LLM
-		schema  *genai.Schema
 		wantErr error
 	}{
-		{name: "nil delegate", inner: nil, schema: schema, wantErr: domain.ErrInvalidInput},
-		{name: "nil schema", inner: validModel, schema: nil, wantErr: domain.ErrInvalidInput},
+		{name: "nil delegate", inner: nil, wantErr: domain.ErrInvalidInput},
+		{name: "valid delegate", inner: validModel, wantErr: nil},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			_, err := newJSONObjectModel(testCase.inner, testCase.schema)
+			_, err := newJSONObjectModel(testCase.inner)
+			if testCase.wantErr == nil {
+				if err != nil {
+					t.Fatalf("newJSONObjectModel() error = %v, want nil", err)
+				}
+				return
+			}
 			if !errors.Is(err, testCase.wantErr) {
 				t.Fatalf("newJSONObjectModel() error = %v, want %v", err, testCase.wantErr)
 			}
@@ -115,42 +156,24 @@ func TestJSONObjectModelRejectsInvalidConstruction(t *testing.T) {
 	}
 }
 
-func TestProviderUsesJSONObjectOutput(t *testing.T) {
-	testCases := []struct {
-		provider string
-		baseURL  string
-		want     bool
-	}{
-		{provider: "zhipu", want: true},
-		{provider: "BigModel", want: true},
-		{provider: "glm", want: true},
-		{provider: "", baseURL: "https://open.bigmodel.cn/api/v1", want: true},
-		{provider: "", baseURL: "https://api.openai.com/v1", want: false},
-		{provider: "openai-compatible", baseURL: "https://open.bigmodel.cn/api/v1", want: false},
-	}
-	for _, testCase := range testCases {
-		if got := providerUsesJSONObjectOutput(testCase.provider, testCase.baseURL); got != testCase.want {
-			t.Fatalf(
-				"providerUsesJSONObjectOutput(%q, %q) = %v, want %v",
-				testCase.provider, testCase.baseURL, got, testCase.want,
-			)
-		}
-	}
-}
-
 func TestJSONObjectModelNormalizesCommentaryAroundJSONPayload(t *testing.T) {
-	payload := `{"answer":"八字显示倾向而非确定。","confidence":0.8,"topic":"career","key_factors":["七杀"],"limitations":["非决定性"]}`
+	payload := `{"answer":"analysis shows a tendency","confidence":0.8}`
 	inner := &capturingLLM{response: &model.LLMResponse{
 		Content: &genai.Content{Role: "model", Parts: []*genai.Part{
-			{Text: "I have the chart facts now.", Thought: true},
+			{Text: "I have the execution facts now.", Thought: true},
 			{Text: "以下是结构化结果：\n" + payload + "\n谢谢。"},
 		}},
 	}}
-	adapter, err := newJSONObjectModel(inner, structuredOutputSchema())
+	deployment := NewTestDeployment(t)
+	entrypoint, err := deployment.EntrypointDefinition()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := newJSONObjectModel(inner)
 	if err != nil {
 		t.Fatalf("newJSONObjectModel() error = %v", err)
 	}
-	request := &model.LLMRequest{Config: &genai.GenerateContentConfig{ResponseSchema: structuredOutputSchema()}}
+	request := &model.LLMRequest{Config: &genai.GenerateContentConfig{ResponseSchema: entrypoint.GenaiOutputSchema}}
 	var normalizedResponse *model.LLMResponse
 	for response, err := range adapter.GenerateContent(context.Background(), request, false) {
 		if err != nil {
@@ -182,30 +205,5 @@ func TestExtractJSONObjectIgnoresBracesInStrings(t *testing.T) {
 	}
 	if _, ok := extractJSONObject("没有对象"); ok {
 		t.Fatal("extractJSONObject() accepted text without a JSON object")
-	}
-}
-
-func TestVisibleEventDropsPartialToolCallDuplicates(t *testing.T) {
-	partial := &session.Event{
-		LLMResponse: model.LLMResponse{
-			Partial: true,
-			Content: &genai.Content{Role: "model", Parts: []*genai.Part{
-				{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "tianwen_time"}},
-			}},
-		},
-	}
-	final := &session.Event{
-		LLMResponse: model.LLMResponse{
-			Content: &genai.Content{Role: "model", Parts: []*genai.Part{
-				{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "tianwen_time"}},
-			}},
-		},
-	}
-	if visible := visibleEvent(partial); visible != nil {
-		t.Fatalf("visibleEvent(partial) = %+v, want nil", visible)
-	}
-	visible := visibleEvent(final)
-	if visible == nil || len(visible.Content.Parts) != 1 || visible.Content.Parts[0].FunctionCall == nil {
-		t.Fatalf("visibleEvent(final) = %+v, want one function call", visible)
 	}
 }

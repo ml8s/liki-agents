@@ -4,17 +4,18 @@ package transport
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/liki/liki-agent/internal/domain"
-	"github.com/liki/liki-agent/internal/observability"
-	"github.com/liki/liki-agent/internal/platform"
-	"github.com/liki/liki-agent/internal/platform/buildinfo"
-	"github.com/liki/liki-agent/internal/platform/identity"
+	"github.com/ml8s/liki-agents/internal/domain"
+	"github.com/ml8s/liki-agents/internal/observability"
+	"github.com/ml8s/liki-agents/internal/platform"
+	"github.com/ml8s/liki-agents/internal/platform/buildinfo"
+	"github.com/ml8s/liki-agents/internal/platform/identity"
 )
 
 type Services struct {
@@ -31,16 +32,29 @@ type Services struct {
 
 type Server struct {
 	services Services
+	routes   *http.ServeMux
 }
 
-func New(services Services) *Server {
+func New(services Services) (*Server, error) {
 	if services.AgentCard == nil || services.A2A == nil || services.AGUI == nil {
-		panic("A2A and AG-UI protocol handlers are required")
+		return nil, fmt.Errorf("A2A and AG-UI protocol handlers are required")
 	}
 	if services.Logger == nil {
 		services.Logger = slog.Default()
 	}
-	return &Server{services: services}
+
+	server := &Server{services: services}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", server.health)
+	mux.HandleFunc("GET /readyz", server.ready)
+	mux.HandleFunc("GET /version", server.version)
+	mux.Handle("GET /metrics", server.metricsHandler())
+	mux.Handle("GET /.well-known/agent-card.json", server.services.AgentCard)
+	mux.Handle("POST /a2a", server.bodyLimit(server.authorized(server.services.A2A, false)))
+	mux.Handle("POST /ag-ui", server.bodyLimit(server.authorized(server.services.AGUI, true)))
+
+	server.routes = mux
+	return server, nil
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -54,29 +68,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	writer.Header().Set("X-Request-ID", requestID)
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
 
-	var handler http.Handler
-	switch {
-	case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
-		handler = http.HandlerFunc(s.health)
-	case r.URL.Path == "/readyz" && r.Method == http.MethodGet:
-		handler = http.HandlerFunc(s.ready)
-	case r.URL.Path == "/version" && r.Method == http.MethodGet:
-		handler = http.HandlerFunc(s.version)
-	case r.URL.Path == "/metrics" && r.Method == http.MethodGet:
-		handler = s.metricsHandler()
-	case r.URL.Path == "/.well-known/agent-card.json" && r.Method == http.MethodGet:
-		handler = s.services.AgentCard
-	case r.URL.Path == "/a2a" && r.Method == http.MethodPost:
-		r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
-		handler = s.authorized(s.services.A2A, false)
-	case r.URL.Path == "/ag-ui" && r.Method == http.MethodPost:
-		r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
-		handler = s.authorized(s.services.AGUI, true)
-	default:
-		handler = http.NotFoundHandler()
-	}
-	handler.ServeHTTP(writer, r)
+	s.routes.ServeHTTP(writer, r)
 	s.observe(r.URL.Path, r.Method, writer.status, time.Since(start))
+}
+
+func (s *Server) bodyLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) observe(path, method string, status int, duration time.Duration) {
@@ -150,7 +150,7 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"service":       "liki-agent",
+		"service":       "liki-agents",
 		"version":       buildinfo.Version,
 		"commit":        buildinfo.Commit,
 		"build_time":    buildinfo.BuildTime,

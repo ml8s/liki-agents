@@ -1,9 +1,11 @@
 package agent
 
 import (
-	"context"
+	"encoding/json"
+	"time"
 
-	"github.com/liki/liki-agent/internal/domain"
+	"github.com/ml8s/liki-agents/internal/audit"
+	"github.com/ml8s/liki-agents/internal/domain"
 )
 
 type Role string
@@ -22,17 +24,15 @@ type RunRequest struct {
 	RunID       string
 	ThreadID    string
 	UserID      string
-	Product     string
-	Locale      string
 	UserMessage string
 	History     []Message
+	Context     json.RawMessage
 }
 
 type RunResult struct {
-	FinalContent   string
-	ExpertOpinions []domain.ExpertOpinion
-	SourceTools    []string
-	Model          string
+	Definition DefinitionRef
+	Output     json.RawMessage
+	Text       string
 }
 
 // StructuredOutputStateKey is the ADK session-state key that holds the parsed
@@ -40,11 +40,10 @@ type RunResult struct {
 // this state key is the framework contract for structured output.
 const StructuredOutputStateKey = structuredOutputStateKey
 
-type LLMCallRecorder interface {
-	Start(ctx context.Context, call *domain.LLMCall) error
-	Finish(ctx context.Context, call *domain.LLMCall) error
+type Metrics interface {
+	ObserveLLMCall(model, status string, usage domain.LLMTokenUsage)
+	ObserveToolCall(agent, tool, status string, duration time.Duration)
+	ObserveAgentDelegation(caller, target, status string, duration time.Duration)
 }
 
-type Metrics interface {
-	ObserveLLMCall(model, status string, promptTokens, completionTokens, totalTokens int64)
-}
+type AuditRecorder = audit.Recorder

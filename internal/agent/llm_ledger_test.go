@@ -2,52 +2,98 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/liki/liki-agent/internal/domain"
+	"github.com/ml8s/liki-agents/internal/audit"
+	"github.com/ml8s/liki-agents/internal/domain"
 	adkagent "google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/model"
 )
 
 type fakeAgentContext struct {
 	adkagent.Context
-	sessionID    string
-	invocationID string
-	agentName    string
+	sessionID      string
+	invocationID   string
+	agentName      string
+	branch         string
+	functionCallID string
+	traceContext   context.Context
 }
 
-func (c *fakeAgentContext) SessionID() string    { return c.sessionID }
-func (c *fakeAgentContext) InvocationID() string { return c.invocationID }
-func (c *fakeAgentContext) AgentName() string    { return c.agentName }
-
-type stubRecorder struct {
-	mu       sync.Mutex
-	starts   int
-	finishes int
-	last     *domain.LLMCall
+func (c *fakeAgentContext) SessionID() string      { return c.sessionID }
+func (c *fakeAgentContext) InvocationID() string   { return c.invocationID }
+func (c *fakeAgentContext) AgentName() string      { return c.agentName }
+func (c *fakeAgentContext) Branch() string         { return c.branch }
+func (c *fakeAgentContext) FunctionCallID() string { return c.functionCallID }
+func (c *fakeAgentContext) Deadline() (time.Time, bool) {
+	if c.traceContext == nil {
+		return time.Time{}, false
+	}
+	return c.traceContext.Deadline()
 }
 
-func (r *stubRecorder) Start(_ context.Context, call *domain.LLMCall) error {
+func (c *fakeAgentContext) Done() <-chan struct{} {
+	if c.traceContext == nil {
+		return nil
+	}
+	return c.traceContext.Done()
+}
+
+func (c *fakeAgentContext) Err() error {
+	if c.traceContext == nil {
+		return nil
+	}
+	return c.traceContext.Err()
+}
+
+func (c *fakeAgentContext) Value(key any) any {
+	if c.traceContext != nil {
+		if value := c.traceContext.Value(key); value != nil {
+			return value
+		}
+	}
+	return context.Background().Value(key)
+}
+
+type stubAuditRecorder struct {
+	mu     sync.Mutex
+	events []audit.Event
+}
+
+func (r *stubAuditRecorder) Record(_ context.Context, event *audit.Event) error {
+	if event == nil {
+		return nil
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.starts++
-	r.last = call
+	r.events = append(r.events, *event)
 	return nil
 }
 
-func (r *stubRecorder) Finish(_ context.Context, call *domain.LLMCall) error {
+func (r *stubAuditRecorder) eventsOfType(eventType audit.EventType) []audit.Event {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.finishes++
-	r.last = call
-	return nil
+	result := make([]audit.Event, 0)
+	for _, event := range r.events {
+		if event.Type == eventType {
+			result = append(result, event)
+		}
+	}
+	return result
 }
 
-func newTestLedger() (*llmLedger, *stubRecorder) {
-	recorder := &stubRecorder{}
-	ledger := newLLMLedger(recorder, nil, "test", func() time.Time {
+func (r *stubAuditRecorder) lastEvent() audit.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.events[len(r.events)-1]
+}
+
+func newTestLedger() (*llmLedger, *stubAuditRecorder) {
+	recorder := &stubAuditRecorder{}
+	ledger := newLLMLedger(recorder, nil, "test", NewTestDeployment(&testing.T{}), func() time.Time {
 		return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
 	})
 	return ledger, recorder
@@ -55,22 +101,23 @@ func newTestLedger() (*llmLedger, *stubRecorder) {
 
 func newTestScope() *llmRunScope {
 	return &llmRunScope{
-		runID:       "run_1",
-		threadID:    "thread_1",
-		userID:      "user_1",
-		agentName:   "chief_analyst",
-		model:       "test-model",
-		product:     "liki",
-		graph:       "test-graph",
-		contract:    "test-contract",
-		prompt:      "test-prompt",
-		policy:      "test-policy",
-		lastByModel: make(map[string]llmCallRuntime),
+		runID:             "run_1",
+		threadID:          "thread_1",
+		userID:            "user_1",
+		agentName:         "coordinator",
+		model:             "test-model",
+		graph:             "test-graph",
+		contract:          "test-contract",
+		instructionDigest: "test-instruction",
+		definitionName:    "test-definition",
+		definitionVersion: "1.0.0",
+		definitionDigest:  "sha256:test",
+		lastByModel:       make(map[string]llmCallRuntime),
 	}
 }
 
 func testCtx() *fakeAgentContext {
-	return &fakeAgentContext{sessionID: "session_1", invocationID: "inv_1", agentName: "chief_analyst"}
+	return &fakeAgentContext{sessionID: "session_1", invocationID: "inv_1", agentName: "coordinator"}
 }
 
 func TestLedgerLifecycleCompletesNormally(t *testing.T) {
@@ -83,22 +130,23 @@ func TestLedgerLifecycleCompletesNormally(t *testing.T) {
 	if _, err := ledger.beforeModel(ctx, &model.LLMRequest{Model: "test-model"}); err != nil {
 		t.Fatalf("beforeModel() error = %v", err)
 	}
-	if recorder.starts != 1 {
-		t.Fatalf("starts = %d, want 1", recorder.starts)
+	if got := len(recorder.eventsOfType(audit.EventLLMCallStarted)); got != 1 {
+		t.Fatalf("started events = %d, want 1", got)
 	}
 	response := &model.LLMResponse{ModelVersion: "test-model"}
 	if _, err := ledger.afterModel(ctx, response, nil); err != nil {
 		t.Fatalf("afterModel() error = %v", err)
 	}
-	if recorder.finishes != 1 {
-		t.Fatalf("finishes = %d, want 1", recorder.finishes)
+	if got := len(recorder.eventsOfType(audit.EventLLMCallCompleted)); got != 1 {
+		t.Fatalf("completed events = %d, want 1", got)
 	}
-	if recorder.last.Status != domain.LLMCallCompleted {
-		t.Fatalf("status = %s, want completed", recorder.last.Status)
+	last := recorder.lastEvent()
+	if last.Status != audit.StatusSucceeded {
+		t.Fatalf("status = %s, want succeeded", last.Status)
 	}
 	ledger.end("session_1", nil)
-	if recorder.finishes != 1 {
-		t.Fatalf("finishes after clean end = %d, want 1 (no double-finish)", recorder.finishes)
+	if got := len(recorder.eventsOfType(audit.EventLLMCallFailed)); got != 0 {
+		t.Fatalf("failed events after clean end = %d, want 0", got)
 	}
 }
 
@@ -110,20 +158,21 @@ func TestLedgerLifecycleFailurePath(t *testing.T) {
 	if _, err := ledger.beforeModel(ctx, &model.LLMRequest{Model: "test-model"}); err != nil {
 		t.Fatalf("beforeModel() error = %v", err)
 	}
-	runErr := domain.NewError("llm_timeout", "LLM timed out", nil)
+	runErr := domain.NewError(domain.CodeRuntimeTimeout, "LLM timed out", nil)
 	_, modelErr := ledger.onModelError(ctx, &model.LLMRequest{Model: "test-model"}, runErr)
 	if modelErr == nil {
 		t.Fatal("onModelError() should propagate the request error")
 	}
-	if recorder.last.Status != domain.LLMCallFailed {
-		t.Fatalf("status = %s, want failed", recorder.last.Status)
+	if got := len(recorder.eventsOfType(audit.EventLLMCallFailed)); got != 1 {
+		t.Fatalf("failed events = %d, want 1", got)
 	}
-	if recorder.last.ErrorCode != "llm_timeout" {
-		t.Fatalf("error_code = %s, want llm_timeout", recorder.last.ErrorCode)
+	last := recorder.lastEvent()
+	if last.ErrorCode != domain.CodeRuntimeTimeout {
+		t.Fatalf("error_code = %s, want %s", last.ErrorCode, domain.CodeRuntimeTimeout)
 	}
 	ledger.end("session_1", nil)
-	if recorder.finishes != 1 {
-		t.Fatalf("finishes = %d, want 1", recorder.finishes)
+	if got := len(recorder.eventsOfType(audit.EventLLMCallFailed)); got != 1 {
+		t.Fatalf("failed events after end = %d, want 1", got)
 	}
 }
 
@@ -136,11 +185,12 @@ func TestLedgerInterruptedRunFailsActiveCalls(t *testing.T) {
 		t.Fatalf("beforeModel() error = %v", err)
 	}
 	ledger.end("session_1", nil)
-	if recorder.finishes != 1 {
-		t.Fatalf("finishes = %d, want 1 from failActive", recorder.finishes)
+	if got := len(recorder.eventsOfType(audit.EventLLMCallFailed)); got != 1 {
+		t.Fatalf("failed events = %d, want 1", got)
 	}
-	if recorder.last.Status != domain.LLMCallFailed {
-		t.Fatalf("status = %s, want failed", recorder.last.Status)
+	last := recorder.lastEvent()
+	if last.Status != audit.StatusFailed {
+		t.Fatalf("last event = %+v, want failed", last)
 	}
 }
 
@@ -169,16 +219,17 @@ func TestLedgerConcurrentCallbacksDoNotRace(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = ledger.beforeModel(ctx, &model.LLMRequest{Model: "test-model"})
-			_, _ = ledger.afterModel(ctx, &model.LLMResponse{ModelVersion: "test-model"}, nil)
+			modelName := fmt.Sprintf("model-%d", i)
+			_, _ = ledger.beforeModel(ctx, &model.LLMRequest{Model: modelName})
+			_, _ = ledger.afterModel(ctx, &model.LLMResponse{ModelVersion: modelName}, nil)
 		}()
 	}
 	wg.Wait()
 	ledger.end("session_1", nil)
-	if recorder.starts < recorder.finishes {
-		t.Fatalf("starts=%d must be >= finishes=%d", recorder.starts, recorder.finishes)
+	if got := len(recorder.eventsOfType(audit.EventLLMCallStarted)); got != 50 {
+		t.Fatalf("started events = %d, want 50", got)
 	}
-	if recorder.starts != 50 {
-		t.Fatalf("starts=%d, want 50", recorder.starts)
+	if got := len(recorder.events); got != 100 {
+		t.Fatalf("audit events = %d, want 100 started/completed-or-failed facts", got)
 	}
 }

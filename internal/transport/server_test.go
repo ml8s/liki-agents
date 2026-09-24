@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/liki/liki-agent/internal/observability"
-	"github.com/liki/liki-agent/internal/platform"
-	"github.com/liki/liki-agent/internal/transport"
+	"github.com/ml8s/liki-agents/internal/observability"
+	"github.com/ml8s/liki-agents/internal/platform"
+	"github.com/ml8s/liki-agents/internal/transport"
 )
 
 type healthy struct{}
@@ -20,14 +20,28 @@ func (healthy) CheckHealth(context.Context) platform.DependencyHealth {
 	return platform.DependencyHealth{Name: "test", OK: true}
 }
 
-func newServer(token string) http.Handler {
-	return transport.New(transport.Services{
+func newServer(t *testing.T, token string) http.Handler {
+	t.Helper()
+	handler, err := transport.New(transport.Services{
 		AgentCard:     http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
 		A2A:           http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }),
 		AGUI:          http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }),
 		HealthChecks:  []platform.HealthChecker{healthy{}},
 		InternalToken: token,
 	})
+	if err != nil {
+		t.Fatalf("transport.New() error = %v", err)
+	}
+	return handler
+}
+
+func mustNewServer(t *testing.T, services transport.Services) http.Handler {
+	t.Helper()
+	handler, err := transport.New(services)
+	if err != nil {
+		t.Fatalf("transport.New() error = %v", err)
+	}
+	return handler
 }
 
 type recordingMetrics struct {
@@ -45,7 +59,7 @@ func (*recordingMetrics) StreamClosed(string) {}
 
 func TestProtocolRequestsAreObserved(t *testing.T) {
 	metrics := &recordingMetrics{}
-	handler := transport.New(transport.Services{
+	handler := mustNewServer(t, transport.Services{
 		AgentCard: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
 		A2A:       http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }),
 		AGUI:      http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }),
@@ -63,7 +77,7 @@ func TestProtocolRequestsAreObserved(t *testing.T) {
 }
 
 func TestProtocolRoutesRequireServiceToken(t *testing.T) {
-	handler := newServer("secret")
+	handler := newServer(t, "secret")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/a2a", strings.NewReader(`{}`)))
 	if response.Code != http.StatusUnauthorized {
@@ -80,7 +94,7 @@ func TestProtocolRoutesRequireServiceToken(t *testing.T) {
 }
 
 func TestAGUIRequiresVerifiedIdentity(t *testing.T) {
-	handler := newServer("")
+	handler := newServer(t, "")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/ag-ui", strings.NewReader(`{}`)))
 	if response.Code != http.StatusUnauthorized {
@@ -97,7 +111,7 @@ func TestAGUIRequiresVerifiedIdentity(t *testing.T) {
 }
 
 func TestOperationalEndpoints(t *testing.T) {
-	handler := newServer("secret")
+	handler := newServer(t, "secret")
 	for _, path := range []string{"/healthz", "/readyz", "/version"} {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
@@ -115,7 +129,7 @@ func TestA2ABodySizeLimit(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusAccepted)
 	})
-	handler := transport.New(transport.Services{
+	handler := mustNewServer(t, transport.Services{
 		AgentCard: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
 		A2A:       readBody,
 		AGUI:      http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }),
@@ -131,7 +145,7 @@ func TestA2ABodySizeLimit(t *testing.T) {
 
 func TestReadyzDoesNotLeakDependencyDetail(t *testing.T) {
 	unhealthy := &unhealthyChecker{name: "engine_mcp", detail: "dial tcp 10.0.0.1:18081: connection refused"}
-	handler := transport.New(transport.Services{
+	handler := mustNewServer(t, transport.Services{
 		AgentCard:    http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
 		A2A:          http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }),
 		AGUI:         http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }),

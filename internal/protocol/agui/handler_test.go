@@ -5,28 +5,40 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/liki/liki-agent/internal/agent"
-	"github.com/liki/liki-agent/internal/platform/identity"
-	"github.com/liki/liki-agent/internal/protocol/agui"
+	"github.com/ml8s/liki-agents/internal/agent"
+	"github.com/ml8s/liki-agents/internal/audit"
+	"github.com/ml8s/liki-agents/internal/platform/identity"
+	"github.com/ml8s/liki-agents/internal/protocol/agui"
+	"github.com/ml8s/liki-agents/internal/testagent"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/genai"
 )
 
+type recordingAuditEvents struct {
+	mu     sync.Mutex
+	events []audit.Event
+}
+
+func (r *recordingAuditEvents) Record(_ context.Context, event *audit.Event) error {
+	return nil
+}
+
 func newRuntime(t *testing.T) *agent.Runtime {
 	t.Helper()
 	runtime, err := agent.NewRuntime(agent.Config{
-		Model:           "test-model",
-		ModelAPIKey:     "test-key",
-		AllowedTools:    []string{"bazi_chart"},
-		EngineMCPURL:    "http://127.0.0.1:1/mcp",
-		PromptVersion:   "test-prompt",
-		PolicyVersion:   "test-policy",
-		GraphVersion:    "test-graph",
-		ContractVersion: "test-contract",
+		Model:            "test-model",
+		ModelAPIKey:      "test-key",
+		Deployment:       testagent.Deployment(t),
+		StructuredOutput: "json_schema",
+		EngineMCPURL:     "http://127.0.0.1:1/mcp",
+		GraphVersion:     "test-graph",
+		ContractVersion:  "test-contract",
+		AuditRecorder:    &recordingAuditEvents{},
 	})
 	if err != nil {
 		t.Fatalf("NewRuntime() error = %v", err)
@@ -56,23 +68,6 @@ func TestAGUIRejectsMalformedInput(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
-	}
-}
-
-func TestAGUIRequiresGatewayIdentity(t *testing.T) {
-	handler, err := agui.New(newRuntime(t), agui.Config{RunTimeout: 5 * time.Second})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	body := `{"threadId":"thread_1","runId":"run_1","messages":[{"id":"m1","role":"user","content":"hello"}]}`
-	request := httptest.NewRequest(http.MethodPost, "/ag-ui", strings.NewReader(body))
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
-	}
-	if !strings.Contains(response.Body.String(), "identity_required") {
-		t.Fatalf("body = %s", response.Body.String())
 	}
 }
 
@@ -120,7 +115,9 @@ func TestAGUIRejectsUnsupportedCapabilitiesInsteadOfDroppingThem(t *testing.T) {
 }
 
 func TestAGUIEmitsStructuredAnswerAsTextLifecycle(t *testing.T) {
-	runtime := &scriptedRuntime{result: agent.RunResult{FinalContent: "结构化答案"}}
+	runtime := &scriptedRuntime{
+		result: agent.RunResult{Output: []byte(`{"answer":"结构化答案"}`), Text: "结构化答案"},
+	}
 	handler, err := agui.New(runtime, agui.Config{RunTimeout: time.Second})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -173,14 +170,21 @@ func TestAGUIEmitsRunErrorOnDeadline(t *testing.T) {
 func TestAGUIEmitsFullToolCallSequenceWithStructuredAnswer(t *testing.T) {
 	events := []*session.Event{
 		{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{
-			{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "bazi_chart", Args: map[string]any{"birth_time": "1984-02-05T08:20:00+08:00"}}}}}}},
+			{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "engine_tool_a", Args: map[string]any{"input_a": "value-a"}}}}}}},
 		{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{
-			{FunctionResponse: &genai.FunctionResponse{ID: "call_1", Name: "bazi_chart", Response: map[string]any{"year_pillar": "甲子"}}}}}}},
+			{FunctionCall: &genai.FunctionCall{ID: "call_2", Name: "engine_tool_b", Args: map[string]any{"input_b": "value-b"}}}}}}},
+		{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{
+			{FunctionResponse: &genai.FunctionResponse{ID: "call_1", Name: "engine_tool_a", Response: map[string]any{"result_a": "value-a"}}}}}}},
+		{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{
+			{FunctionResponse: &genai.FunctionResponse{ID: "call_2", Name: "engine_tool_b", Response: map[string]any{"result_b": "value-b"}}}}}}},
 		{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "最终分析"}}}}},
 	}
 	runtime := &scriptedRuntime{
 		events: events,
-		result: agent.RunResult{FinalContent: "最终分析", SourceTools: []string{"bazi_chart"}},
+		result: agent.RunResult{
+			Output: []byte(`{"answer":"最终分析"}`),
+			Text:   "最终分析",
+		},
 	}
 	handler, err := agui.New(runtime, agui.Config{RunTimeout: time.Second})
 	if err != nil {
@@ -207,17 +211,32 @@ func TestAGUIEmitsFullToolCallSequenceWithStructuredAnswer(t *testing.T) {
 		}
 		last = index
 	}
-	if !strings.Contains(body, "bazi_chart") {
+	if !strings.Contains(body, "engine_tool_a") {
 		t.Fatalf("tool name not found in SSE body")
 	}
-	if !strings.Contains(body, "甲子") {
+	if !strings.Contains(body, "value-a") {
 		t.Fatalf("tool result not found in SSE body")
+	}
+	for _, callID := range []string{"call_1", "call_2"} {
+		if !strings.Contains(body, callID) {
+			t.Fatalf("SSE body missing %s", callID)
+		}
+	}
+	for _, kind := range []string{
+		"TOOL_CALL_START", "TOOL_CALL_ARGS", "TOOL_CALL_RESULT", "TOOL_CALL_END",
+	} {
+		if got := strings.Count(body, `"type":"`+kind+`"`); got != 2 {
+			t.Fatalf("%s appeared %d times, want 2", kind, got)
+		}
 	}
 }
 
 func TestAGUIPassesHistoryToRuntime(t *testing.T) {
 	var captured agent.RunRequest
-	runtime := &capturingRuntime{capture: &captured, result: agent.RunResult{FinalContent: "好的"}}
+	runtime := &capturingRuntime{
+		capture: &captured,
+		result:  agent.RunResult{Output: []byte(`{"answer":"好的"}`), Text: "好的"},
+	}
 	handler, err := agui.New(runtime, agui.Config{RunTimeout: time.Second})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)

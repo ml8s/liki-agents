@@ -1,8 +1,6 @@
-// Structured-output provider compatibility. ADK's OpenAI model maps
-// ResponseSchema to the OpenAI Responses API json_schema format. Providers in
-// the OpenAI-compatible family may only expose json_object; this adapter keeps
-// the agent's single structured contract while selecting the provider-safe
-// wire format and describing the same schema to the model.
+// This file adapts provider-specific structured output wire formats. ADK's
+// OpenAI model maps ResponseSchema to json_schema; some OpenAI-compatible
+// providers only expose json_object while retaining the same output contract.
 package agent
 
 import (
@@ -10,10 +8,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
-	"net/url"
 	"strings"
 
-	"github.com/liki/liki-agent/internal/domain"
+	"github.com/ml8s/liki-agents/internal/domain"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 )
@@ -30,24 +27,15 @@ const systemRole = "system"
 type jsonObjectModel struct {
 	delegate model.LLM
 	name     string
-	schema   string
 }
 
-func newJSONObjectModel(delegate model.LLM, schema *genai.Schema) (*jsonObjectModel, error) {
+func newJSONObjectModel(delegate model.LLM) (*jsonObjectModel, error) {
 	if delegate == nil {
 		return nil, fmt.Errorf("%w: delegate model is required", domain.ErrInvalidInput)
-	}
-	if schema == nil {
-		return nil, fmt.Errorf("%w: structured output schema is required", domain.ErrInvalidInput)
-	}
-	raw, err := json.Marshal(schema)
-	if err != nil {
-		return nil, fmt.Errorf("marshal structured output schema: %w", err)
 	}
 	return &jsonObjectModel{
 		delegate: delegate,
 		name:     delegate.Name(),
-		schema:   string(raw),
 	}, nil
 }
 
@@ -59,13 +47,13 @@ func (m *jsonObjectModel) GenerateContent(
 	stream bool,
 ) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		adapted, err := m.adaptRequest(req)
+		adapted, structured, err := m.adaptRequest(req)
 		if err != nil {
 			yield(nil, domain.NewError(domain.CodeLLMRequestInvalid, "adapt structured output request", err))
 			return
 		}
 		for response, err := range m.delegate.GenerateContent(ctx, adapted, stream) {
-			if err == nil {
+			if err == nil && structured {
 				response = m.normalizeResponse(response)
 			}
 			if !yield(response, err) {
@@ -75,27 +63,37 @@ func (m *jsonObjectModel) GenerateContent(
 	}
 }
 
-func (m *jsonObjectModel) adaptRequest(req *model.LLMRequest) (*model.LLMRequest, error) {
+func (m *jsonObjectModel) adaptRequest(req *model.LLMRequest) (*model.LLMRequest, bool, error) {
 	if req == nil {
-		return nil, fmt.Errorf("%w: LLM request is required", domain.ErrInvalidInput)
+		return nil, false, fmt.Errorf("%w: LLM request is required", domain.ErrInvalidInput)
 	}
-	config := req.Config
-	if config == nil {
-		config = &genai.GenerateContentConfig{}
+	if req.Config == nil {
+		return req, false, nil
 	}
-	adaptedConfig := *config
+	var schema any
+	if req.Config.ResponseSchema != nil {
+		schema = req.Config.ResponseSchema
+	} else if req.Config.ResponseJsonSchema != nil {
+		schema = req.Config.ResponseJsonSchema
+	} else {
+		return req, false, nil
+	}
+	adaptedConfig := *req.Config
 	adaptedConfig.ResponseSchema = nil
 	adaptedConfig.ResponseJsonSchema = nil
 	adaptedConfig.ResponseMIMEType = "application/json"
-
-	instruction := structuredOutputInstructionPrefix + m.schema
-	if config.SystemInstruction == nil {
+	raw, err := json.Marshal(schema)
+	if err != nil {
+		return nil, false, fmt.Errorf("marshal structured output schema: %w", err)
+	}
+	instruction := structuredOutputInstructionPrefix + string(raw)
+	if req.Config.SystemInstruction == nil {
 		adaptedConfig.SystemInstruction = genai.NewContentFromText(instruction, systemRole)
 	} else {
-		parts := make([]*genai.Part, 0, len(config.SystemInstruction.Parts)+1)
-		parts = append(parts, config.SystemInstruction.Parts...)
+		parts := make([]*genai.Part, 0, len(req.Config.SystemInstruction.Parts)+1)
+		parts = append(parts, req.Config.SystemInstruction.Parts...)
 		parts = append(parts, &genai.Part{Text: instruction})
-		role := config.SystemInstruction.Role
+		role := req.Config.SystemInstruction.Role
 		if role == "" {
 			role = systemRole
 		}
@@ -104,7 +102,7 @@ func (m *jsonObjectModel) adaptRequest(req *model.LLMRequest) (*model.LLMRequest
 
 	adapted := *req
 	adapted.Config = &adaptedConfig
-	return &adapted, nil
+	return &adapted, true, nil
 }
 
 // normalizeResponse handles providers that accept json_object but still emit
@@ -192,24 +190,4 @@ func extractJSONObject(raw string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// providerUsesJSONObjectOutput reports providers whose OpenAI-compatible
-// Responses implementation does not accept the strict json_schema format.
-// Explicit configuration is preferred; the URL fallback preserves existing
-// deployments that configure Zhipu only by base URL.
-func providerUsesJSONObjectOutput(provider, baseURL string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "zhipu", "bigmodel", "glm":
-		return true
-	case "":
-		parsed, err := url.Parse(strings.TrimSpace(baseURL))
-		if err != nil {
-			return false
-		}
-		host := strings.ToLower(parsed.Hostname())
-		return host == "open.bigmodel.cn" || strings.HasSuffix(host, ".open.bigmodel.cn")
-	default:
-		return false
-	}
 }

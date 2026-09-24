@@ -5,19 +5,24 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ml8s/liki-agents/internal/domain"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type Metrics struct {
-	registry         *prometheus.Registry
-	protocolRequests *prometheus.CounterVec
-	protocolLatency  *prometheus.HistogramVec
-	activeStreams    *prometheus.GaugeVec
-	llmTokens        *prometheus.CounterVec
-	llmCalls         *prometheus.CounterVec
-	dependencyUp     *prometheus.GaugeVec
+	registry          *prometheus.Registry
+	protocolRequests  *prometheus.CounterVec
+	protocolLatency   *prometheus.HistogramVec
+	activeStreams     *prometheus.GaugeVec
+	llmTokens         *prometheus.CounterVec
+	llmCalls          *prometheus.CounterVec
+	toolCalls         *prometheus.CounterVec
+	toolLatency       *prometheus.HistogramVec
+	delegations       *prometheus.CounterVec
+	delegationLatency *prometheus.HistogramVec
+	dependencyUp      *prometheus.GaugeVec
 }
 
 func New() *Metrics {
@@ -29,28 +34,46 @@ func New() *Metrics {
 	metrics := &Metrics{
 		registry: registry,
 		protocolRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "liki_agent_protocol_requests_total",
+			Name: "liki_agents_protocol_requests_total",
 			Help: "Agent protocol requests by protocol, operation, and status.",
 		}, []string{"protocol", "operation", "status"}),
 		protocolLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "liki_agent_protocol_request_duration_seconds",
+			Name:    "liki_agents_protocol_request_duration_seconds",
 			Help:    "Agent protocol request duration.",
 			Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300},
 		}, []string{"protocol", "operation"}),
 		activeStreams: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "liki_agent_protocol_active_streams",
+			Name: "liki_agents_protocol_active_streams",
 			Help: "Currently active streaming protocol requests.",
 		}, []string{"protocol"}),
 		llmTokens: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "liki_agent_llm_tokens_total",
+			Name: "liki_agents_llm_tokens_total",
 			Help: "LLM tokens by model and token type.",
 		}, []string{"model", "type"}),
 		llmCalls: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "liki_agent_llm_calls_total",
+			Name: "liki_agents_llm_calls_total",
 			Help: "LLM calls by model and status.",
 		}, []string{"model", "status"}),
+		toolCalls: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "liki_agents_tool_calls_total",
+			Help: "Engine tool calls by agent, tool, and status.",
+		}, []string{"agent", "tool", "status"}),
+		toolLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "liki_agents_tool_duration_seconds",
+			Help:    "Engine tool duration by agent and tool.",
+			Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
+		}, []string{"agent", "tool"}),
+		delegations: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "liki_agents_delegations_total",
+			Help: "Agent delegations by caller, target, and status.",
+		}, []string{"caller", "target", "status"}),
+		delegationLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "liki_agents_delegation_duration_seconds",
+			Help:    "Agent delegation duration by caller and target.",
+			Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300},
+		}, []string{"caller", "target"}),
 		dependencyUp: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "liki_agent_dependency_up",
+			Name: "liki_agents_dependency_up",
 			Help: "Whether a runtime dependency is ready.",
 		}, []string{"dependency"}),
 	}
@@ -60,6 +83,10 @@ func New() *Metrics {
 		metrics.activeStreams,
 		metrics.llmTokens,
 		metrics.llmCalls,
+		metrics.toolCalls,
+		metrics.toolLatency,
+		metrics.delegations,
+		metrics.delegationLatency,
 		metrics.dependencyUp,
 	)
 	return metrics
@@ -74,12 +101,22 @@ func (m *Metrics) ObserveHTTPRequest(protocol, operation, status string, duratio
 	m.protocolLatency.WithLabelValues(protocol, operation).Observe(duration.Seconds())
 }
 
-func (m *Metrics) ObserveLLMCall(model, status string, promptTokens, completionTokens, totalTokens int64) {
+func (m *Metrics) ObserveLLMCall(model, status string, usage domain.LLMTokenUsage) {
 	m.llmCalls.WithLabelValues(model, status).Inc()
-	m.llmTokens.WithLabelValues(model, "prompt").Add(float64(promptTokens))
-	m.llmTokens.WithLabelValues(model, "completion").Add(float64(completionTokens))
-	m.llmTokens.WithLabelValues(model, "thought").Add(float64(0))
-	m.llmTokens.WithLabelValues(model, "total").Add(float64(totalTokens))
+	m.llmTokens.WithLabelValues(model, "prompt").Add(float64(usage.PromptTokens))
+	m.llmTokens.WithLabelValues(model, "completion").Add(float64(usage.CompletionTokens))
+	m.llmTokens.WithLabelValues(model, "thought").Add(float64(usage.ThoughtTokens))
+	m.llmTokens.WithLabelValues(model, "total").Add(float64(usage.TotalTokens))
+}
+
+func (m *Metrics) ObserveToolCall(agent, tool, status string, duration time.Duration) {
+	m.toolCalls.WithLabelValues(agent, tool, status).Inc()
+	m.toolLatency.WithLabelValues(agent, tool).Observe(duration.Seconds())
+}
+
+func (m *Metrics) ObserveAgentDelegation(caller, target, status string, duration time.Duration) {
+	m.delegations.WithLabelValues(caller, target, status).Inc()
+	m.delegationLatency.WithLabelValues(caller, target).Observe(duration.Seconds())
 }
 
 func (m *Metrics) StreamOpened(protocol string) {

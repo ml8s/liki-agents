@@ -66,11 +66,11 @@ func TestDomainStaysPure(t *testing.T) {
 	root := filepath.Join(moduleRoot(t), "internal", "domain")
 	for path, imports := range importsUnder(t, root) {
 		if imported := forbidden(imports,
-			"github.com/liki/liki-agent/internal/adapters",
-			"github.com/liki/liki-agent/internal/agent",
-			"github.com/liki/liki-agent/internal/protocol",
-			"github.com/liki/liki-agent/internal/platform",
-			"github.com/liki/liki-agent/internal/ports",
+			"github.com/ml8s/liki-agents/internal/adapters",
+			"github.com/ml8s/liki-agents/internal/agent",
+			"github.com/ml8s/liki-agents/internal/protocol",
+			"github.com/ml8s/liki-agents/internal/platform",
+			"github.com/ml8s/liki-agents/internal/ports",
 			"google.golang.org/adk",
 			"google.golang.org/genai",
 			"net/http",
@@ -99,21 +99,27 @@ func TestADKStaysInRuntimeAndProtocolAdapters(t *testing.T) {
 	}
 }
 
-func TestNoSourceFileWritesSecrets(t *testing.T) {
+func TestProductionSourceDoesNotMutateHostState(t *testing.T) {
 	root := moduleRoot(t)
-	for path, imports := range importsUnder(t, root) {
-		if strings.Contains(path, "architecture_test.go") {
-			continue
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() || !strings.HasSuffix(path, ".go") {
+			return walkErr
 		}
-		data, err := os.ReadFile(filepath.Join(root, path))
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
+		if strings.HasSuffix(path, "_test.go") || strings.HasSuffix(path, "architecture_test.go") || strings.Contains(path, filepath.Join("internal", "testagent")) {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
 		}
 		text := string(data)
 		if strings.Contains(text, "os.Setenv(") || strings.Contains(text, "os.WriteFile(") {
 			t.Errorf("%s mutates process environment or files", path)
 		}
-		_ = imports
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk source: %v", err)
 	}
 }
 
@@ -123,7 +129,6 @@ func TestLegacyRuntimeAbstractionsAreAbsent(t *testing.T) {
 		"ThreadRepository",
 		"MessageRepository",
 		"RunRepository",
-		"EventRepository",
 		"IdempotencyRepository",
 		"EventSink",
 		"/v1/threads",
@@ -165,19 +170,61 @@ func TestDatabaseTechnologyStaysInAuditSQLite(t *testing.T) {
 	}
 }
 
+func TestRuntimeDoesNotUseADKDemoLogging(t *testing.T) {
+	for path, imports := range importsUnder(t, filepath.Join(moduleRoot(t), "internal")) {
+		if imported := forbidden(imports, "google.golang.org/adk/v2/plugin/loggingplugin"); imported != "" {
+			t.Errorf("%s imports unsafe demo logger %s", path, imported)
+		}
+	}
+}
+
+func TestADKLauncherIsNotAPublicAPI(t *testing.T) {
+	for path, imports := range importsUnder(t, moduleRoot(t)) {
+		if imported := forbidden(imports,
+			"google.golang.org/adk/v2/cmd/launcher",
+			"google.golang.org/adk/v2/server/adkrest",
+		); imported != "" {
+			t.Errorf("%s imports ADK Launcher REST machinery %s", path, imported)
+		}
+	}
+}
+
+func TestAgentCardDoesNotUseInstructionDerivedSkills(t *testing.T) {
+	root := moduleRoot(t)
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() || !strings.HasSuffix(path, ".go") {
+			return walkErr
+		}
+		if strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(data), "BuildAgentSkills") {
+			t.Errorf("%s uses ADK instruction-derived Agent Card skills", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk source: %v", err)
+	}
+}
+
 func TestProtocolAdaptersDoNotCrossImport(t *testing.T) {
 	root := moduleRoot(t)
 	for path, imports := range importsUnder(t, root) {
 		if strings.HasPrefix(path, filepath.Join("internal", "protocol", "a2a")) &&
-			forbidden(imports, "github.com/liki/liki-agent/internal/protocol/agui") != "" {
+			forbidden(imports, "github.com/ml8s/liki-agents/internal/protocol/agui") != "" {
 			t.Errorf("%s imports AG-UI", path)
 		}
 		if strings.HasPrefix(path, filepath.Join("internal", "protocol", "agui")) &&
-			forbidden(imports, "github.com/liki/liki-agent/internal/protocol/a2a") != "" {
+			forbidden(imports, "github.com/ml8s/liki-agents/internal/protocol/a2a") != "" {
 			t.Errorf("%s imports A2A", path)
 		}
 		if strings.HasPrefix(path, filepath.Join("internal", "agent")) &&
-			forbidden(imports, "github.com/liki/liki-agent/internal/protocol") != "" {
+			forbidden(imports, "github.com/ml8s/liki-agents/internal/protocol") != "" {
 			t.Errorf("%s protocol import violates inward dependency direction", path)
 		}
 	}
@@ -208,5 +255,38 @@ func TestErrorCodesAreConstants(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("walk source: %v", err)
+	}
+}
+
+func TestAgentRuntimeHasNoBuiltInDomainWorkflow(t *testing.T) {
+	root := filepath.Join(moduleRoot(t), "internal", "agent")
+	banned := []string{
+		"ExpertOpinion",
+		"ProductProfile",
+		"structuredOutputSchema",
+		"chief_analyst",
+		"destiny-analysis expert",
+	}
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() || !strings.HasSuffix(path, ".go") {
+			return walkErr
+		}
+		if strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		text := string(data)
+		for _, value := range banned {
+			if strings.Contains(text, value) {
+				t.Errorf("%s contains built-in domain workflow concept %q", path, value)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk agent runtime: %v", err)
 	}
 }

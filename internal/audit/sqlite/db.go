@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/glebarez/sqlite"
-	"github.com/liki/liki-agent/internal/platform"
+	"github.com/ml8s/liki-agents/internal/platform"
 	"github.com/pressly/goose/v3"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"

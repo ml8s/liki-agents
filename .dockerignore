@@ -1,0 +1,12 @@
+.git/
+.env
+.env.*
+bin/
+data/
+backups/
+dev/
+docs/
+evals/
+tests/
+*.md
+*.log

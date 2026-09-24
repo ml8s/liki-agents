@@ -3,30 +3,30 @@
 package agui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	aguievents "github.com/ag-ui-protocol/ag-ui/sdks/community/go/pkg/core/events"
 	aguitypes "github.com/ag-ui-protocol/ag-ui/sdks/community/go/pkg/core/types"
 	aguisse "github.com/ag-ui-protocol/ag-ui/sdks/community/go/pkg/encoding/sse"
-	"github.com/liki/liki-agent/internal/agent"
-	"github.com/liki/liki-agent/internal/domain"
-	"github.com/liki/liki-agent/internal/observability"
-	"github.com/liki/liki-agent/internal/platform/identity"
+	"github.com/ml8s/liki-agents/internal/agent"
+	"github.com/ml8s/liki-agents/internal/domain"
+	"github.com/ml8s/liki-agents/internal/observability"
+	"github.com/ml8s/liki-agents/internal/platform/identity"
 	"google.golang.org/adk/v2/session"
-	"google.golang.org/genai"
 )
-
-const Path = "/ag-ui"
 
 type Config struct {
 	RunTimeout time.Duration
 	Metrics    observability.ProtocolMetrics
+	Entrypoint string
 }
 
 // Handler is the AG-UI protocol adapter.
@@ -34,6 +34,7 @@ type Handler struct {
 	runtime    runtime
 	runTimeout time.Duration
 	metrics    observability.ProtocolMetrics
+	entrypoint string
 	writer     *aguisse.SSEWriter
 }
 
@@ -54,6 +55,7 @@ func New(runtime runtime, config Config) (*Handler, error) {
 		runtime:    runtime,
 		runTimeout: config.RunTimeout,
 		metrics:    config.Metrics,
+		entrypoint: config.Entrypoint,
 		writer:     aguisse.NewSSEWriter(),
 	}, nil
 }
@@ -71,12 +73,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	caller, ok := identity.UserIDFromContext(r.Context())
-	if !ok || strings.TrimSpace(caller) == "" {
-		writeProtocolError(w, http.StatusUnauthorized, domain.CodeIdentityRequired, "verified user identity required")
-		return
-	}
-
 	threadID := strings.TrimSpace(input.ThreadID)
 	if threadID == "" {
 		threadID = aguievents.GenerateThreadID()
@@ -85,6 +81,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if runID == "" {
 		runID = aguievents.GenerateRunID()
 	}
+	caller, _ := identity.UserIDFromContext(r.Context())
 	if err := validateTextChatProfile(input); err != nil {
 		writeProtocolError(w, http.StatusUnprocessableEntity, domain.CodeUnsupportedAGUIFeature, err.Error())
 		return
@@ -116,19 +113,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	streamer := &stream{
-		threadID:    threadID,
-		runID:       runID,
-		messageID:   runID + ":assistant",
-		activeTools: make(map[string]string),
+		runID:      runID,
+		messageID:  runID + ":assistant",
+		entrypoint: h.entrypoint,
 	}
 	spec := agent.RunRequest{
 		RunID:       runID,
 		ThreadID:    threadID,
 		UserID:      caller,
-		Product:     forwardedString(input.ForwardedProps, "product", "liki-agent"),
-		Locale:      forwardedString(input.ForwardedProps, "locale", "zh-CN"),
 		UserMessage: content,
 		History:     history,
+		Context:     opaqueJSON(input.ForwardedProps),
 	}
 	runCtx, cancelRun := context.WithTimeout(r.Context(), h.runTimeout)
 	defer cancelRun()
@@ -136,35 +131,49 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return streamer.consume(event, emit)
 	})
 	if runErr == nil {
-		runErr = streamer.finish(result.FinalContent, emit)
+		runErr = streamer.finish(result.Text, emit)
+	}
+	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+		message, code := publicError(runErr)
+		if err := streamer.failSubagents(message, code, emit); err != nil {
+			return
+		}
 	}
 	if runErr == nil {
 		finished := aguievents.NewRunFinishedEvent(threadID, runID)
 		finished.Result = map[string]any{
-			"answer":          result.FinalContent,
-			"expert_opinions": result.ExpertOpinions,
-			"source_tools":    result.SourceTools,
+			"definition": result.Definition,
+			"output":     json.RawMessage(result.Output),
 		}
 		runErr = emit(finished)
 	}
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
-		_ = emit(aguievents.NewRunErrorEvent(publicErrorMessage(runErr)))
+		message, code := publicError(runErr)
+		_ = emit(aguievents.NewRunErrorEvent(message, aguievents.WithErrorCode(code), aguievents.WithRunID(runID)))
 	}
 }
 
 // stream converts framework-native execution facts into official AG-UI events.
 // It owns no alternative runtime or business state.
 type stream struct {
-	threadID    string
-	runID       string
-	messageID   string
-	textStarted bool
-	sawText     bool
-	activeTools map[string]string
+	runID      string
+	messageID  string
+	entrypoint string
+	subagents  []*subagentActivation
+	nextID     int
+}
+
+type subagentActivation struct {
+	id     string
+	name   string
+	branch string
 }
 
 func (s *stream) consume(event *session.Event, emit func(aguievents.Event) error) error {
-	if event == nil {
+	if err := s.observeSubagent(event, emit); err != nil {
+		return err
+	}
+	if event == nil || event.Content == nil {
 		return nil
 	}
 	for _, part := range event.Content.Parts {
@@ -172,11 +181,7 @@ func (s *stream) consume(event *session.Event, emit func(aguievents.Event) error
 			continue
 		}
 		call := part.FunctionCall
-		callID := call.ID
-		if callID == "" {
-			callID = s.runID + ":" + call.Name
-		}
-		s.activeTools[callID] = call.Name
+		callID := protocolToolID(s.runID, call.Name, call.ID)
 		if err := emit(aguievents.NewToolCallStartEvent(callID, call.Name)); err != nil {
 			return err
 		}
@@ -198,10 +203,7 @@ func (s *stream) consume(event *session.Event, emit func(aguievents.Event) error
 			continue
 		}
 		response := part.FunctionResponse
-		responseID := response.ID
-		if responseID == "" {
-			responseID = s.runID + ":" + response.Name
-		}
+		responseID := protocolToolID(s.runID, response.Name, response.ID)
 		payload, err := json.Marshal(response.Response)
 		if err != nil || len(payload) == 0 || string(payload) == "null" {
 			payload = []byte("{}")
@@ -212,60 +214,129 @@ func (s *stream) consume(event *session.Event, emit func(aguievents.Event) error
 		if err := emit(aguievents.NewToolCallEndEvent(responseID)); err != nil {
 			return err
 		}
-		delete(s.activeTools, responseID)
 	}
 
-	text := textFromParts(event.Content.Parts)
-	if event.Partial && text != "" {
-		if err := s.startText(emit); err != nil {
-			return err
-		}
-		return emit(aguievents.NewTextMessageContentEvent(s.messageID, text))
-	}
-	if event.IsFinalResponse() && text != "" && !s.sawText {
-		if err := s.startText(emit); err != nil {
-			return err
-		}
-		if err := emit(aguievents.NewTextMessageContentEvent(s.messageID, text)); err != nil {
-			return err
-		}
-	}
-	if event.IsFinalResponse() && s.textStarted {
-		s.textStarted = false
-		return emit(aguievents.NewTextMessageEndEvent(s.messageID))
-	}
 	return nil
 }
 
 // finish closes an active message and synthesizes the standard text lifecycle
 // when the model returned only a structured final answer.
 func (s *stream) finish(content string, emit func(aguievents.Event) error) error {
-	if s.textStarted {
-		s.textStarted = false
-		if err := emit(aguievents.NewTextMessageEndEvent(s.messageID)); err != nil {
-			return err
-		}
+	if err := s.finishSubagents(emit); err != nil {
+		return err
 	}
-	if s.sawText || strings.TrimSpace(content) == "" {
+	content = strings.TrimSpace(content)
+	if content == "" {
 		return nil
 	}
-	if err := s.startText(emit); err != nil {
+	if err := emit(aguievents.NewTextMessageStartEvent(s.messageID, aguievents.WithRole(string(aguitypes.RoleAssistant)))); err != nil {
 		return err
 	}
 	if err := emit(aguievents.NewTextMessageContentEvent(s.messageID, content)); err != nil {
 		return err
 	}
-	s.textStarted = false
 	return emit(aguievents.NewTextMessageEndEvent(s.messageID))
 }
 
-func (s *stream) startText(emit func(aguievents.Event) error) error {
-	if s.textStarted {
+func (s *stream) observeSubagent(event *session.Event, emit func(aguievents.Event) error) error {
+	if event == nil || event.Author == "" || event.Author == s.entrypoint {
+		return s.finishDeeperThan(eventBranch(event), emit)
+	}
+	branch := eventBranch(event)
+	if err := s.finishDeeperThan(branch, emit); err != nil {
+		return err
+	}
+	if branch == "" {
 		return nil
 	}
-	s.textStarted = true
-	s.sawText = true
-	return emit(aguievents.NewTextMessageStartEvent(s.messageID, aguievents.WithRole(string(aguitypes.RoleAssistant))))
+	for _, activation := range s.subagents {
+		if activation.branch == branch {
+			return nil
+		}
+	}
+
+	s.nextID++
+	activation := &subagentActivation{
+		id:     s.runID + ":subagent:" + strconv.Itoa(s.nextID),
+		name:   event.Author,
+		branch: branch,
+	}
+	started := aguievents.NewSubagentStartedEvent(activation.id, activation.name)
+	started.ParentSubagentRunID = s.parentID(branch)
+	s.subagents = append(s.subagents, activation)
+	return emit(started)
+}
+
+func eventBranch(event *session.Event) string {
+	if event == nil {
+		return ""
+	}
+	return strings.TrimSpace(event.Branch)
+}
+
+func (s *stream) finishDeeperThan(branch string, emit func(aguievents.Event) error) error {
+	closed := 0
+	for index := len(s.subagents) - 1; index >= 0; index-- {
+		activation := s.subagents[index]
+		if isBranchPrefix(activation.branch, branch) {
+			break
+		}
+		closed++
+		if err := emit(aguievents.NewSubagentFinishedEvent(activation.id)); err != nil {
+			return err
+		}
+	}
+	if closed == 0 {
+		return nil
+	}
+	s.subagents = s.subagents[:len(s.subagents)-closed]
+	return nil
+}
+
+func (s *stream) finishSubagents(emit func(aguievents.Event) error) error {
+	for index := len(s.subagents) - 1; index >= 0; index-- {
+		if err := emit(aguievents.NewSubagentFinishedEvent(s.subagents[index].id)); err != nil {
+			return err
+		}
+	}
+	s.subagents = nil
+	return nil
+}
+
+func (s *stream) failSubagents(message, code string, emit func(aguievents.Event) error) error {
+	for index := len(s.subagents) - 1; index >= 0; index-- {
+		if err := emit(aguievents.NewSubagentErrorEvent(
+			s.subagents[index].id,
+			message,
+			aguievents.WithSubagentErrorCode(code),
+		)); err != nil {
+			return err
+		}
+	}
+	s.subagents = nil
+	return nil
+}
+
+func (s *stream) parentID(branch string) string {
+	parent := branch
+	found := false
+	if index := strings.LastIndex(branch, "."); index >= 0 {
+		parent = branch[:index]
+		found = true
+	}
+	if !found {
+		return ""
+	}
+	for index := len(s.subagents) - 1; index >= 0; index-- {
+		if s.subagents[index].branch == parent {
+			return s.subagents[index].id
+		}
+	}
+	return ""
+}
+
+func isBranchPrefix(prefix, branch string) bool {
+	return prefix == branch || strings.HasPrefix(branch, prefix+".")
 }
 
 // validateTextChatProfile rejects capabilities this runtime does not consume.
@@ -372,39 +443,39 @@ func conversationText(content any) (string, error) {
 	}
 }
 
-func textFromParts(parts []*genai.Part) string {
-	if len(parts) == 0 {
-		return ""
+func protocolToolID(runID, toolName, id string) string {
+	if id != "" {
+		return id
 	}
-	var result strings.Builder
-	for _, part := range parts {
-		if part != nil && !part.Thought {
-			result.WriteString(part.Text)
-		}
-	}
-	return result.String()
+	return runID + ":" + toolName
 }
 
-func forwardedString(value any, key, fallback string) string {
-	object, ok := value.(map[string]any)
-	if !ok {
-		return fallback
+func opaqueJSON(value any) json.RawMessage {
+	raw, err := json.Marshal(value)
+	if err != nil || bytes.Equal(raw, []byte("null")) {
+		return json.RawMessage("{}")
 	}
-	if text, ok := object[key].(string); ok && strings.TrimSpace(text) != "" {
-		return text
-	}
-	return fallback
+	return raw
 }
 
 func publicErrorMessage(err error) string {
+	message, _ := publicError(err)
+	return message
+}
+
+func publicError(err error) (message, code string) {
 	var domainErr *domain.Error
-	if errors.As(err, &domainErr) && domainErr.Message != "" {
-		return domainErr.Message
+	if errors.As(err, &domainErr) {
+		message := domainErr.Message
+		if message == "" {
+			message = domainErr.Code
+		}
+		return message, domainErr.Code
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return "agent run exceeded its deadline"
+		return "agent run exceeded its deadline", domain.CodeRuntimeTimeout
 	}
-	return "agent run failed"
+	return "agent run failed", domain.CodeRuntimeFailed
 }
 
 func writeProtocolError(w http.ResponseWriter, status int, code, message string) {

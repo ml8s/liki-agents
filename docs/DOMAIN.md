@@ -1,82 +1,58 @@
-# Domain Model
+# Runtime Domain Model
 
-## Purpose
+`liki-agents` is a generic multi-agent runtime. Prompts, skill workflow, tool
+semantics, domain schemas, and domain evaluation belong to the Liki
+skill/project.
 
-`liki-agent` turns one user question into a grounded destiny-analysis opinion.
-It does not own commerce, accounts, durable conversations, entitlements, or
-deterministic calculation. A user question may contain birth data and locale;
-the agent validates the question, uses Engine MCP for chart facts, and returns
-one structured expert opinion.
-
-## Domain boundary
-
-`internal/domain` contains stable concepts and invariants only. It does not
-import HTTP, MCP, ADK, LLM SDK, database, or adapter packages. Application and
-adapter layers depend inward on the domain; the domain never depends outward.
-
-The stable domain vocabulary is:
+## Core runtime concepts
 
 | Concept | Meaning |
 |---|---|
-| Run | One stateless agent execution identified by `RunID` and `ThreadID` |
-| Expert opinion | The normalized result of one analysis |
-| Engine tool | An allowlisted deterministic computation exposed over MCP |
+| AgentDeployment | External deployment artifact containing one or more Agent definitions |
+| AgentDefinition | One Agent's instruction, optional output schema, and tool allowlist |
+| Run | One stateless execution identified by `RunID` and `ThreadID` |
+| Tool execution | One allowlisted MCP tool invocation |
 | LLM call | One auditable model invocation inside a run |
-| Policy version | The safety-policy revision applied to an analysis |
-| Prompt version | The prompt revision applied to an analysis |
+| Audit event | Immutable evidence of a lifecycle fact |
 
-## ExpertOpinion
+## AgentDeployment invariants
 
-`domain.ExpertOpinion` is the stable output contract. It is also represented by
-`contracts/expert-opinion.schema.json`.
+1. The artifact is loaded from the filesystem and cannot be uploaded at runtime.
+2. Prompt and output schema are external files, not Go defaults.
+3. `output.textPointer` selects the user-facing string from validated output.
+4. An empty tool allowlist means the Agent has no tool access.
+5. Instruction and schema digests identify exact behavior; a plain-text Agent
+   has an empty schema digest.
+6. Deployment, instruction, and schema digests enter audit evidence.
 
-| Field | Meaning | Invariant |
-|---|---|---|
-| `expert` | The expert that produced the conclusion | Required |
-| `system` | The destiny system, such as Bazi or Ziwei | Required |
-| `school` | Optional school or calculation convention | Optional |
-| `topic` | Short canonical analysis topic | Optional |
-| `conclusion` | Complete user-facing answer | Required, non-empty |
-| `confidence` | Degree of confidence in the conclusion | `0.0` through `1.0` |
-| `supporting_factors` | Grounded factors supporting the conclusion | Optional |
-| `limitations` | Uncertainty, missing data, and safety boundaries | Optional |
-| `source_tools` | Engine tools that produced deterministic facts | Must reflect real calls |
-| `metadata` | Non-domain runtime provenance | Optional |
-| `created_at` | Opinion creation time | Required by the JSON contract |
+## Execution invariants
 
-`ExpertOpinion.Validate()` requires `expert`, `system`, a non-empty
-`conclusion`, and confidence in the inclusive range `[0,1]`. Missing user-facing
-content is a domain error, not a protocol-specific concern.
+1. Only allowlisted MCP tools can be exposed or invoked.
+2. Tool input/output are audited as canonical digests and sizes, never raw payload.
+3. Plain text is the default output contract.
+4. Structured output is optional and validated against the Agent's external
+   JSON Schema.
+5. `RunResult.Output` is generic validated JSON for structured Agents.
+6. `RunResult.Text` is final model text for plain Agents or the configured
+   JSON Pointer value for structured Agents.
+7. Failed runs mark pending tool executions as interrupted so every tool has a
+   terminal audit event.
 
-## Safety invariants
+## Audit invariants
 
-1. Deterministic chart claims must come from Engine MCP tools.
-2. `source_tools` is derived from real tool responses, never from model claims.
-3. Conclusions express tendency and uncertainty; they do not issue medical,
-   legal, investment, or other professional directives.
-4. The agent must not hide missing birth data or material calculation limits.
-5. Prompt and policy versions travel with runtime metadata and audit evidence.
+1. Audit events are append-only at the database boundary.
+2. Every run has started and terminal lifecycle evidence.
+3. Every model call has started and terminal lifecycle evidence.
+4. Every tool call has started and terminal lifecycle evidence, including
+   interrupted calls.
+5. Audit records version and digest provenance, but not secrets, prompts, raw
+   model output, or tool payloads.
+6. Audit write failures fail closed; cancellation does not prevent terminal
+   audit events.
 
-## Audit model
+## Ownership boundary
 
-`domain.LLMCall` is the durable audit model. One row represents one logical LLM
-call and records:
-
-- run, thread, user, product, agent, model, and provider correlation;
-- `running`, `completed`, or `failed` status;
-- prompt, completion, thought, and total token usage;
-- duration, error code, and error message;
-- graph, engine-contract, prompt, and policy versions.
-
-`run_id`, `thread_id`, and `user_id` are opaque cross-service identifiers. The
-audit ledger intentionally has no foreign keys because users, threads, products,
-and payments belong to other services. Failed model calls retain a stable error
-code from `internal/domain/error_codes.go`; error codes are never bare literals
-outside that source of truth.
-
-## Run state
-
-Run state is execution working state, not a product aggregate. Protocol input
-supplies history and identity; ADK session state is scoped to one run and is
-not used as durable conversation storage. A crashed or cancelled run is
-retried by starting a new run.
+`liki-web` owns users, products, entitlements, quota, and durable conversations.
+The Liki skill/project owns domain behavior and MCP tool semantics.
+`liki-agents` owns generic execution, protocol adaptation, evidence, and
+operations.

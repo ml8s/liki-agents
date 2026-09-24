@@ -5,25 +5,30 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/liki/liki-agent/internal/domain"
+	"github.com/ml8s/liki-agents/internal/audit"
+	"github.com/ml8s/liki-agents/internal/domain"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/auth"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/openaimodel"
 	"google.golang.org/adk/v2/plugin"
-	"google.golang.org/adk/v2/plugin/loggingplugin"
 	"google.golang.org/adk/v2/plugin/retryandreflect"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/mcptoolset"
-	"google.golang.org/genai"
 )
 
 const (
@@ -35,13 +40,17 @@ const (
 )
 
 type Runtime struct {
-	config   Config
-	root     agent.Agent
-	sessions session.Service
-	runner   *runner.Runner
-	plugins  runner.PluginConfig
-	toolset  tool.Toolset
-	llm      *llmLedger
+	config            Config
+	definition        *Deployment
+	entrypoint        *AgentDefinition
+	root              agent.Agent
+	sessions          session.Service
+	runner            *runner.Runner
+	runnerConfig      runner.Config
+	llm               *llmLedger
+	delegationAuditor *AgentReferenceAuditor
+	toolAuditor       *ToolExecutionAuditor
+	tracer            trace.Tracer
 }
 
 func NewRuntime(config Config) (*Runtime, error) {
@@ -49,25 +58,10 @@ func NewRuntime(config Config) (*Runtime, error) {
 		config.Logger = slog.Default()
 	}
 	if config.AppName == "" {
-		config.AppName = "liki-agent"
-	}
-	if config.AgentName == "" {
-		config.AgentName = "chief_analyst"
-	}
-	if config.AgentDescription == "" {
-		config.AgentDescription = "Grounded destiny analysis assistant"
-	}
-	if config.System == "" {
-		config.System = "chief"
-	}
-	if config.ExpertName == "" {
-		config.ExpertName = "chief_analyst"
+		config.AppName = "liki-agents"
 	}
 	if config.Model == "" {
 		return nil, domain.NewError(domain.CodeLLMModelMissing, "LLM model is required", domain.ErrInvalidInput)
-	}
-	if len(config.AllowedTools) == 0 {
-		return nil, domain.NewError(domain.CodeEngineToolsEmpty, "at least one Engine tool must be allowlisted", domain.ErrInvalidInput)
 	}
 	if config.ModelTimeout <= 0 {
 		config.ModelTimeout = 120 * time.Second
@@ -75,18 +69,41 @@ func NewRuntime(config Config) (*Runtime, error) {
 	if config.EngineMCPURL == "" {
 		return nil, domain.NewError(domain.CodeEngineMCPURLMissing, "Engine MCP URL is required", domain.ErrInvalidInput)
 	}
+	if config.AuditRecorder == nil {
+		return nil, domain.NewError(domain.CodeAuditRecorderMissing, "audit recorder is required", domain.ErrInvalidInput)
+	}
+	if config.Deployment == nil {
+		return nil, domain.NewError(domain.CodeAgentDefinitionMissing, "AgentDefinition is required", domain.ErrInvalidInput)
+	}
+	entrypoint, err := config.Deployment.EntrypointDefinition()
+	if err != nil {
+		return nil, domain.NewError(domain.CodeAgentDefinitionInvalid, "select entrypoint AgentDefinition", err)
+	}
+	switch config.StructuredOutput {
+	case StructuredOutputNone, StructuredOutputJSONSchema, StructuredOutputJSONObject:
+	default:
+		return nil, domain.NewError(domain.CodeStructuredOutputCapabilityInvalid, "structured output capability is invalid", domain.ErrInvalidInput)
+	}
+	structuredAgents := 0
+	for _, candidate := range config.Deployment.Spec.Agents {
+		if candidate.Output.Structured() {
+			structuredAgents++
+		}
+	}
+	if structuredAgents > 0 && config.StructuredOutput == StructuredOutputNone ||
+		structuredAgents == 0 && config.StructuredOutput != StructuredOutputNone {
+		return nil, domain.NewError(domain.CodeStructuredOutputCapabilityInvalid, "structured output capability does not match AgentDeployment", domain.ErrInvalidInput)
+	}
 	if config.EngineTimeout <= 0 {
 		config.EngineTimeout = 30 * time.Second
 	}
 	if config.Now == nil {
 		config.Now = func() time.Time { return time.Now().UTC() }
 	}
-	if config.PromptVersion == "" {
-		config.PromptVersion = "chief-analysis-v1"
+	if config.TracerProvider == nil {
+		config.TracerProvider = otel.GetTracerProvider()
 	}
-	if config.PolicyVersion == "" {
-		config.PolicyVersion = "destiny-safety-v1"
-	}
+	tracer := config.TracerProvider.Tracer("github.com/ml8s/liki-agents/agent")
 	// Protocol callers own durable conversation/product history. Each ADK
 	// session is deliberately run-scoped working state and must not become a
 	// second durable conversation store.
@@ -97,9 +114,8 @@ func NewRuntime(config Config) (*Runtime, error) {
 		aiModel = config.modelOverride
 	} else {
 		var err error
-		// Use ADK's built-in openaimodel (Responses API). Zhipu supports the
-		// Responses API at https://open.bigmodel.cn/api/v1. For providers that
-		// only support Chat Completions, switch to ChatCompletionsModel.
+		// Use ADK's official OpenAI-compatible model. The provider-aware
+		// structured-output adapter handles providers without JSON schema mode.
 		aiModel, err = openaimodel.NewModel(context.Background(), config.Model, &openaimodel.ClientConfig{
 			APIKey:     config.ModelAPIKey,
 			BaseURL:    config.ModelBaseURL,
@@ -108,8 +124,9 @@ func NewRuntime(config Config) (*Runtime, error) {
 		if err != nil {
 			return nil, domain.NewError(domain.CodeLLMUnavailable, "create LLM model", err)
 		}
-		if providerUsesJSONObjectOutput(config.Provider, config.ModelBaseURL) {
-			compatModel, err := newJSONObjectModel(aiModel, structuredOutputSchema())
+		useJSONObject := config.StructuredOutput == StructuredOutputJSONObject
+		if useJSONObject {
+			compatModel, err := newJSONObjectModel(aiModel)
 			if err != nil {
 				return nil, domain.NewError(domain.CodeRuntimeInitFailed, "create provider structured output model", err)
 			}
@@ -117,12 +134,92 @@ func NewRuntime(config Config) (*Runtime, error) {
 		}
 	}
 	temperature := float32(config.Temperature)
-	ledger := newLLMLedger(config.LLMRecorder, config.Metrics, config.Provider, config.Now)
-	toolset, err := newEngineToolset(config)
+	ledger := newLLMLedger(config.AuditRecorder, config.Metrics, config.Provider, config.Deployment, config.Now)
+	engineTools, err := newEngineToolset(config)
 	if err != nil {
 		return nil, err
 	}
-	plugins := make([]*plugin.Plugin, 0, 2)
+	toolAuditor := newToolExecutionAuditor(
+		config.AuditRecorder,
+		config.Metrics,
+		config.Now,
+		config.Provider,
+		config.Deployment,
+		ledger.scope,
+	)
+	delegationAuditor := newAgentReferenceAuditor(
+		config.AuditRecorder,
+		config.Metrics,
+		config.Now,
+		config.Deployment,
+		entrypoint.Name,
+		ledger.scope,
+	)
+	builtAgents := make(map[string]agent.Agent, len(config.Deployment.Spec.Agents))
+	building := make(map[string]struct{})
+	var buildAgent func(*AgentDefinition) (agent.Agent, error)
+	buildAgent = func(definition *AgentDefinition) (agent.Agent, error) {
+		if built, ok := builtAgents[definition.Name]; ok {
+			return built, nil
+		}
+		if _, active := building[definition.Name]; active {
+			return nil, domain.NewError(domain.CodeAgentDefinitionInvalid, fmt.Sprintf("agent delegation cycle through %q", definition.Name), nil)
+		}
+		building[definition.Name] = struct{}{}
+		outputKey := ""
+		if definition.Output.Structured() {
+			outputKey = structuredOutputStateKey
+		}
+		subAgents := make([]agent.Agent, 0, len(definition.SubAgents))
+		for _, reference := range definition.SubAgents {
+			target, ok := config.Deployment.Agent(reference.Name)
+			if !ok {
+				return nil, domain.NewError(domain.CodeAgentDefinitionInvalid, fmt.Sprintf("sub-agent %q is not defined", reference.Name), nil)
+			}
+			subAgent, err := buildAgent(target)
+			if err != nil {
+				return nil, err
+			}
+			subAgents = append(subAgents, subAgent)
+		}
+		toolset := tool.FilterToolset(engineTools, tool.AllowedToolsPredicate(definition.Tools.Allow))
+		delete(building, definition.Name)
+		built, err := llmagent.New(definition.ADKConfig(ADKAgentRuntime{
+			RawOutputSchema: definition.RawOutputSchema,
+			Model:           aiModel,
+			Toolset:         toolset,
+			SubAgents:       subAgents,
+			Temperature:     temperature,
+			OutputKey:       outputKey,
+			IsEntrypoint:    definition.Name == entrypoint.Name,
+			BeforeModelCallbacks: []llmagent.BeforeModelCallback{
+				ledger.beforeModel,
+			},
+			AfterModelCallbacks: []llmagent.AfterModelCallback{
+				ledger.afterModel,
+			},
+			OnModelErrorCallbacks: []llmagent.OnModelErrorCallback{
+				ledger.onModelError,
+			},
+			BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+				delegationAuditor.BeforeAgent,
+			},
+			AfterAgentCallbacks: []agent.AfterAgentCallback{
+				delegationAuditor.AfterAgent,
+			},
+			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
+				toolAuditor.BeforeTool,
+			},
+			AfterToolCallbacks: []llmagent.AfterToolCallback{
+				toolAuditor.AfterTool,
+			},
+		}))
+		if err != nil {
+			return nil, domain.NewError(domain.CodeRuntimeInitFailed, fmt.Sprintf("create ADK agent %q", definition.Name), err)
+		}
+		builtAgents[definition.Name] = built
+		return built, nil
+	}
 	retryPlugin, err := retryandreflect.New(
 		retryandreflect.WithMaxRetries(2),
 		retryandreflect.WithErrorIfRetryExceeded(true),
@@ -130,39 +227,12 @@ func NewRuntime(config Config) (*Runtime, error) {
 	if err != nil {
 		return nil, domain.NewError(domain.CodeRuntimeInitFailed, "create tool retry plugin", err)
 	}
-	plugins = append(plugins, retryPlugin)
-	if config.Env == "development" {
-		loggingPlugin, err := loggingplugin.New("liki_debug")
-		if err != nil {
-			return nil, domain.NewError(domain.CodeRuntimeInitFailed, "create logging plugin", err)
-		}
-		plugins = append(plugins, loggingPlugin)
-	}
-	root, err := llmagent.New(llmagent.Config{
-		Name:        config.AgentName,
-		Description: config.AgentDescription,
-		Model:       aiModel,
-		Instruction: instruction(config),
-		Toolsets:    []tool.Toolset{toolset},
-		BeforeModelCallbacks: []llmagent.BeforeModelCallback{
-			ledger.beforeModel,
-		},
-		AfterModelCallbacks: []llmagent.AfterModelCallback{
-			ledger.afterModel,
-		},
-		OnModelErrorCallbacks: []llmagent.OnModelErrorCallback{
-			ledger.onModelError,
-		},
-		GenerateContentConfig: &genai.GenerateContentConfig{
-			Temperature: &temperature,
-		},
-		OutputSchema: structuredOutputSchema(),
-		OutputKey:    structuredOutputStateKey,
-	})
+	plugins := []*plugin.Plugin{retryPlugin}
+	root, err := buildAgent(entrypoint)
 	if err != nil {
 		return nil, domain.NewError(domain.CodeRuntimeInitFailed, "create ADK agent", err)
 	}
-	runnerInstance, err := runner.New(runner.Config{
+	runnerConfig := runner.Config{
 		AppName:           config.AppName,
 		Agent:             root,
 		SessionService:    sessionService,
@@ -171,18 +241,23 @@ func NewRuntime(config Config) (*Runtime, error) {
 			Plugins:      plugins,
 			CloseTimeout: 5 * time.Second,
 		},
-	})
+	}
+	runnerInstance, err := runner.New(runnerConfig)
 	if err != nil {
 		return nil, domain.NewError(domain.CodeRuntimeInitFailed, "create ADK runner", err)
 	}
 	return &Runtime{
-		config:   config,
-		root:     root,
-		sessions: sessionService,
-		runner:   runnerInstance,
-		plugins:  runner.PluginConfig{Plugins: plugins, CloseTimeout: 5 * time.Second},
-		toolset:  toolset,
-		llm:      ledger,
+		config:            config,
+		root:              root,
+		sessions:          sessionService,
+		runner:            runnerInstance,
+		runnerConfig:      runnerConfig,
+		llm:               ledger,
+		delegationAuditor: delegationAuditor,
+		toolAuditor:       toolAuditor,
+		tracer:            tracer,
+		definition:        config.Deployment,
+		entrypoint:        entrypoint,
 	}, nil
 }
 
@@ -192,13 +267,24 @@ func newEngineToolset(config Config) (tool.Toolset, error) {
 		credential = auth.StaticToken(config.EngineToken)
 	}
 	engineTools, err := mcptoolset.New(mcptoolset.Config{
-		Transport: newEngineTransport(config),
+		Transport: newEngineToolTransport(config),
 		Auth:      credential,
 	})
 	if err != nil {
 		return nil, domain.NewError(domain.CodeEngineToolsUnavailable, "create Engine MCP toolset", err)
 	}
-	return tool.FilterToolset(engineTools, tool.AllowedToolsPredicate(config.AllowedTools)), nil
+	return engineTools, nil
+}
+
+func agentMode(mode AgentMode) llmagent.Mode {
+	switch mode {
+	case AgentModeTask:
+		return llmagent.ModeTask
+	case AgentModeSingleTurn:
+		return llmagent.ModeSingleTurn
+	default:
+		return llmagent.ModeChat
+	}
 }
 
 // RootAgent exposes the single ADK graph to standard protocol adapters. ADK
@@ -210,13 +296,7 @@ func (r *Runtime) RootAgent() agent.Agent {
 // RunnerConfig returns the shared ADK runtime configuration used by protocol
 // bindings. The same plugins and run-scoped session service are preserved.
 func (r *Runtime) RunnerConfig() runner.Config {
-	return runner.Config{
-		AppName:           r.config.AppName,
-		Agent:             r.root,
-		SessionService:    r.sessions,
-		AutoCreateSession: true,
-		PluginConfig:      r.plugins,
-	}
+	return r.runnerConfig
 }
 
 // AuditRunScope identifies an externally driven ADK execution for the LLM
@@ -225,16 +305,14 @@ type AuditRunScope struct {
 	RunID    string
 	ThreadID string
 	UserID   string
-	Product  string
 }
 
 // BeginAuditRun attaches protocol identity to model callbacks when an official
 // protocol executor drives the shared ADK runtime directly.
-func (r *Runtime) BeginAuditRun(sessionID string, scope AuditRunScope) error {
+func (r *Runtime) BeginAuditRun(ctx context.Context, sessionID string, scope AuditRunScope) error {
 	scope.RunID = strings.TrimSpace(scope.RunID)
 	scope.ThreadID = strings.TrimSpace(scope.ThreadID)
 	scope.UserID = strings.TrimSpace(scope.UserID)
-	scope.Product = strings.TrimSpace(scope.Product)
 	if scope.RunID == "" || scope.ThreadID == "" || scope.UserID == "" {
 		return domain.NewError(domain.CodeAuditScopeRequired, "run, thread, and user identifiers are required", domain.ErrInvalidInput)
 	}
@@ -242,33 +320,91 @@ func (r *Runtime) BeginAuditRun(sessionID string, scope AuditRunScope) error {
 		return domain.NewError(domain.CodeAuditSessionRequired, "audit session identifier is required", domain.ErrInvalidInput)
 	}
 	started := r.llm.begin(sessionID, &llmRunScope{
-		runID:       domain.ID(scope.RunID),
-		threadID:    domain.ID(scope.ThreadID),
-		userID:      scope.UserID,
-		agentName:   r.config.AgentName,
-		model:       r.config.Model,
-		product:     scope.Product,
-		graph:       r.config.GraphVersion,
-		contract:    r.config.ContractVersion,
-		prompt:      r.config.PromptVersion,
-		policy:      r.config.PolicyVersion,
-		lastByModel: make(map[string]llmCallRuntime),
+		runID:             domain.ID(scope.RunID),
+		threadID:          domain.ID(scope.ThreadID),
+		userID:            scope.UserID,
+		agentName:         r.entrypoint.Name,
+		model:             r.config.Model,
+		graph:             r.config.GraphVersion,
+		contract:          r.config.ContractVersion,
+		instructionDigest: r.entrypoint.InstructionDigest,
+		definitionName:    r.definition.Metadata.Name,
+		definitionVersion: r.definition.Metadata.Version,
+		definitionDigest:  r.definition.Digest,
+		lastByModel:       make(map[string]llmCallRuntime),
 	})
 	if !started {
 		return domain.NewError(domain.CodeAuditSessionActive, "an audit run is already active for this session", domain.ErrInvalidInput)
 	}
-	return nil
+	return r.config.AuditRecorder.Record(ctx, &audit.Event{
+		ID:            scope.RunID + ":started",
+		SchemaVersion: audit.SchemaV1,
+		Type:          audit.EventRunStarted,
+		OccurredAt:    r.config.Now(),
+		RootRunID:     domain.ID(scope.RunID),
+		RunID:         domain.ID(scope.RunID),
+		ThreadID:      domain.ID(scope.ThreadID),
+		UserID:        scope.UserID,
+		AgentName:     r.entrypoint.Name,
+		Status:        audit.StatusRunning,
+	})
 }
 
 // EndAuditRun completes an externally driven audit lifecycle exactly once.
-func (r *Runtime) EndAuditRun(sessionID string, runErr error) {
+func (r *Runtime) EndAuditRun(ctx context.Context, sessionID string, runErr error) error {
+	ctx = context.WithoutCancel(ctx)
 	if sessionID == "" {
-		return
+		return nil
 	}
-	r.llm.end(sessionID, runtimeError(runErr))
+	scope, existed := r.llm.scope(sessionID)
+	_, ledgerErr := r.llm.end(sessionID, runtimeError(runErr))
+	if ledgerErr != nil {
+		return ledgerErr
+	}
+	if existed {
+		if auditErr := r.delegationAuditor.FailPending(ctx, scope, runErr); auditErr != nil {
+			return auditErr
+		}
+		if auditErr := r.toolAuditor.FailPending(ctx, scope, runErr); auditErr != nil {
+			return auditErr
+		}
+	}
+	if !existed {
+		return nil
+	}
+	eventType := audit.EventRunCompleted
+	status := audit.StatusSucceeded
+	if runErr != nil {
+		eventType = audit.EventRunFailed
+		status = audit.StatusFailed
+	}
+	event := audit.Event{
+		ID:            sessionID + ":" + string(eventType),
+		SchemaVersion: audit.SchemaV1,
+		Type:          eventType,
+		OccurredAt:    r.config.Now(),
+		RootRunID:     scope.runID,
+		RunID:         scope.runID,
+		ThreadID:      scope.threadID,
+		UserID:        scope.userID,
+		AgentName:     scope.agentName,
+		Status:        status,
+	}
+	if runErr != nil {
+		runtimeErr := runtimeError(runErr)
+		var domainErr *domain.Error
+		if errors.As(runtimeErr, &domainErr) {
+			event.ErrorCode = domainErr.Code
+			event.ErrorMessage = domainErr.Message
+		} else {
+			event.ErrorCode = domain.CodeRuntimeFailed
+			event.ErrorMessage = runtimeErr.Error()
+		}
+	}
+	return r.config.AuditRecorder.Record(ctx, &event)
 }
 
-// Stream executes the shared ADK runtime and exposes native ADK events to a
+// Run executes the shared ADK runtime and exposes native ADK events to a
 // protocol adapter. It is not a public API and creates no second business path.
 func (r *Runtime) Run(
 	ctx context.Context,
@@ -276,39 +412,80 @@ func (r *Runtime) Run(
 	observe func(*session.Event) error,
 ) (RunResult, error) {
 	var runErr error
+	ctx, runSpan := r.tracer.Start(
+		ctx,
+		"agent.run "+r.entrypoint.Name,
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(
+			attribute.String("liki.run.id", request.RunID),
+			attribute.String("liki.run.root_id", request.RunID),
+			attribute.String("liki.thread.id", request.ThreadID),
+			attribute.String("gen_ai.agent.name", r.entrypoint.Name),
+			attribute.String("liki.agent.version", r.entrypoint.Version),
+			attribute.String("liki.definition.name", r.definition.Metadata.Name),
+			attribute.String("liki.definition.version", r.definition.Metadata.Version),
+			attribute.String("liki.definition.digest", r.definition.Digest),
+		),
+	)
+	defer runSpan.End()
+	startedAt := r.config.Now()
 	state := &runState{
-		request:         request,
-		now:             r.config.Now,
-		structured:      true,
-		activeToolCalls: make(map[string]toolCallRuntime),
-		lastToolCalls:   make(map[string]toolCallRuntime),
+		capturePlain:   !r.entrypoint.Output.Structured(),
+		plainAgentName: r.entrypoint.Name,
 	}
 	// Session identity is run-scoped. Thread identity remains owned by the
 	// application database, preventing implicit duplication of durable history.
 	sessionID := "run:" + request.RunID
 	scope := &llmRunScope{
-		runID:       domain.ID(request.RunID),
-		threadID:    domain.ID(request.ThreadID),
-		userID:      request.UserID,
-		agentName:   r.config.AgentName,
-		model:       r.config.Model,
-		product:     request.Product,
-		graph:       r.config.GraphVersion,
-		contract:    r.config.ContractVersion,
-		prompt:      r.config.PromptVersion,
-		policy:      r.config.PolicyVersion,
-		lastByModel: make(map[string]llmCallRuntime),
+		runID:             domain.ID(request.RunID),
+		threadID:          domain.ID(request.ThreadID),
+		userID:            request.UserID,
+		agentName:         r.entrypoint.Name,
+		model:             r.config.Model,
+		graph:             r.config.GraphVersion,
+		contract:          r.config.ContractVersion,
+		instructionDigest: r.entrypoint.InstructionDigest,
+		definitionName:    r.definition.Metadata.Name,
+		definitionVersion: r.definition.Metadata.Version,
+		definitionDigest:  r.definition.Digest,
+		lastByModel:       make(map[string]llmCallRuntime),
 	}
 	r.llm.begin(sessionID, scope)
+	if auditErr := r.recordRunAudit(ctx, request, audit.EventRunStarted, audit.StatusRunning, startedAt, nil); auditErr != nil {
+		return RunResult{}, auditErr
+	}
 	defer func() {
-		r.llm.end(sessionID, runErr)
+		// Capture the run scope before the LLM ledger removes it so pending
+		// delegation/tool auditors can still emit terminal evidence.
+		auditScope, _ := r.llm.scope(sessionID)
+		_, _ = r.llm.end(sessionID, runErr)
+		if delegationAuditErr := r.delegationAuditor.FailPending(context.WithoutCancel(ctx), auditScope, runErr); delegationAuditErr != nil && runErr == nil {
+			runErr = delegationAuditErr
+		}
+		if toolAuditErr := r.toolAuditor.FailPending(context.WithoutCancel(ctx), auditScope, runErr); toolAuditErr != nil && runErr == nil {
+			runErr = toolAuditErr
+		}
+		eventType := audit.EventRunCompleted
+		status := audit.StatusSucceeded
+		var auditFailure error
+		if runErr != nil {
+			eventType = audit.EventRunFailed
+			status = audit.StatusFailed
+			auditFailure = runErr
+		}
+		auditCtx := context.WithoutCancel(ctx)
+		if auditErr := r.recordRunAudit(auditCtx, request, eventType, status, startedAt, auditFailure); auditErr != nil && runErr == nil {
+			runErr = auditErr
+		}
 	}()
-	r.config.Logger.Info("agent_run_started",
-		"run_id", request.RunID,
-		"thread_id", request.ThreadID,
-		"user_id", request.UserID,
-		"model", r.config.Model,
-	)
+	r.config.Logger.InfoContext(ctx, "agent_run_started",
+		append(traceLogFields(ctx),
+			"run_id", request.RunID,
+			"thread_id", request.ThreadID,
+			"user_id", request.UserID,
+			"model", r.config.Model,
+		)...)
+
 	events := r.runner.Run(
 		ctx,
 		request.UserID,
@@ -318,87 +495,100 @@ func (r *Runtime) Run(
 	)
 	for event, err := range events {
 		if err != nil {
-			r.config.Logger.Warn("agent_run_failed",
-				"run_id", request.RunID, "error", err)
+			runSpan.RecordError(err)
+			runSpan.SetStatus(codes.Error, runtimeError(err).Error())
+			r.config.Logger.WarnContext(ctx, "agent_run_failed",
+				append(traceLogFields(ctx),
+					"run_id", request.RunID, "error", err,
+				)...)
 			runErr = runtimeError(err)
 			return RunResult{}, runErr
 		}
+		state.consume(event)
 		if observe != nil {
 			if visible := visibleEvent(event); visible != nil {
 				if err := observe(visible); err != nil {
-					return RunResult{}, err
+					runSpan.RecordError(err)
+					runSpan.SetStatus(codes.Error, runtimeError(err).Error())
+					runErr = runtimeError(err)
+					return RunResult{}, runErr
 				}
 			}
 		}
-		if err := state.consume(event); err != nil {
-			return RunResult{}, err
-		}
 	}
-	if state.analysis == nil {
+	if r.entrypoint.Output.Structured() && state.output.JSON == nil {
 		if err := r.loadStructuredAnalysis(ctx, request, sessionID, state); err != nil {
-			return RunResult{}, err
+			runSpan.RecordError(err)
+			runSpan.SetStatus(codes.Error, runtimeError(err).Error())
+			runErr = runtimeError(err)
+			return RunResult{}, runErr
 		}
 	}
 
-	var content string
-	confidence := unstructuredFallbackConfidence
-	var topic string
-	var supportingFactors []string
-	var limitations []string
-	structuredUsed := state.analysis != nil
-	if structuredUsed {
-		content = strings.TrimSpace(state.analysis.Answer)
-		confidence = state.analysis.Confidence
-		topic = state.analysis.Topic
-		supportingFactors = state.analysis.KeyFactors
-		limitations = state.analysis.Limitations
-	} else {
-		content = strings.TrimSpace(state.final.String())
-		limitations = []string{"structured analysis output was unavailable; response was downgraded to text"}
-	}
-	if content == "" {
+	if strings.TrimSpace(state.output.Text) == "" {
 		r.config.Logger.Warn("agent_run_empty_response", "run_id", request.RunID)
-		runErr = domain.NewError(domain.CodeRuntimeEmptyResponse, "ADK runtime returned no final response", nil)
+		runErr = domain.NewError(domain.CodeRuntimeEmptyResponse, "ADK runtime returned no answer text", nil)
 		return RunResult{}, runErr
 	}
-	opinion := domain.ExpertOpinion{
-		Expert:            r.config.ExpertName,
-		System:            r.config.System,
-		Topic:             topic,
-		Conclusion:        content,
-		Confidence:        confidence,
-		SupportingFactors: supportingFactors,
-		Limitations:       limitations,
-		SourceTools:       state.tools(),
-		CreatedAt:         r.config.Now(),
-		Metadata: map[string]any{
-			"model":          r.config.Model,
-			"policy_version": r.config.PolicyVersion,
-			"prompt_version": r.config.PromptVersion,
-			"runtime":        "google-adk-go/v2",
-			"structured":     structuredUsed,
-		},
-	}
-	if err := opinion.Validate(); err != nil {
-		r.config.Logger.Warn("agent_run_opinion_invalid",
-			"run_id", request.RunID, "error", err)
-		runErr = err
-		return RunResult{}, runErr
-	}
-	r.config.Logger.Info("agent_run_completed",
-		"run_id", request.RunID,
-		"topic", opinion.Topic,
-		"confidence", opinion.Confidence,
-		"structured", structuredUsed,
-		"tools_used", state.tools(),
-		"model", r.config.Model,
-	)
+	runSpan.SetStatus(codes.Ok, "")
+	r.config.Logger.InfoContext(ctx, "agent_run_completed",
+		append(traceLogFields(ctx),
+			"run_id", request.RunID,
+			"agent", r.entrypoint.Name,
+			"tools_used", state.tools.Names(),
+			"model", r.config.Model,
+		)...)
+
 	return RunResult{
-		FinalContent:   content,
-		ExpertOpinions: []domain.ExpertOpinion{opinion},
-		SourceTools:    state.tools(),
-		Model:          r.config.Model,
+		Definition: r.definition.DefinitionRef(),
+		Output:     state.output.JSON,
+		Text:       state.output.Text,
 	}, nil
+}
+
+func (r *Runtime) recordRunAudit(
+	ctx context.Context,
+	request RunRequest,
+	eventType audit.EventType,
+	status audit.Status,
+	startedAt time.Time,
+	cause error,
+) error {
+	event := audit.Event{
+		TraceID:           traceIDFromContext(ctx),
+		SpanID:            spanIDFromContext(ctx),
+		DefinitionName:    r.definition.Metadata.Name,
+		DefinitionVersion: r.definition.Metadata.Version,
+		DefinitionDigest:  r.definition.Digest,
+		ID:                request.RunID + ":" + string(eventType),
+		SchemaVersion:     audit.SchemaV1,
+		Type:              eventType,
+		OccurredAt:        r.config.Now(),
+		RootRunID:         domain.ID(request.RunID),
+		RunID:             domain.ID(request.RunID),
+		ThreadID:          domain.ID(request.ThreadID),
+		UserID:            request.UserID,
+		AgentName:         r.entrypoint.Name,
+		Model:             r.config.Model,
+		Provider:          r.config.Provider,
+		Status:            status,
+		DurationMS:        r.config.Now().Sub(startedAt).Milliseconds(),
+	}
+	if cause != nil {
+		runtimeErr := runtimeError(cause)
+		var domainErr *domain.Error
+		if errors.As(runtimeErr, &domainErr) {
+			event.ErrorCode = domainErr.Code
+			event.ErrorMessage = domainErr.Message
+		} else {
+			event.ErrorCode = domain.CodeRuntimeFailed
+			event.ErrorMessage = runtimeErr.Error()
+		}
+	}
+	if err := event.Validate(); err != nil {
+		return err
+	}
+	return r.config.AuditRecorder.Record(ctx, &event)
 }
 
 // loadStructuredAnalysis consumes the parsed model output from ADK session
@@ -422,10 +612,45 @@ func (r *Runtime) loadStructuredAnalysis(ctx context.Context, request RunRequest
 	if err != nil {
 		return nil
 	}
-	return state.consumeStructuredOutput(value)
+	return state.consumeStructuredOutput(value, r.entrypoint)
 }
 
 // visibleEvent strips model-generated structured payload text before native
 // events cross the runtime boundary. In the structured-output graph, model
 // text is protocol payload (JSON), never user-facing message content. Function
 // call and response facts remain visible to protocol adapters.
+
+// Entrypoint exposes the selected AgentDefinition to protocol adapters.
+func (r *Runtime) Entrypoint() *AgentDefinition {
+	return r.entrypoint
+}
+
+// Deployment exposes non-secret deployment metadata for standard protocol
+// discovery. Instructions and schemas remain internal to the runtime.
+func (r *Runtime) Deployment() *Deployment {
+	return r.definition
+}
+
+func traceLogFields(ctx context.Context) []any {
+	spanContext := trace.SpanContextFromContext(ctx)
+	if !spanContext.IsValid() {
+		return nil
+	}
+	return []any{"trace_id", spanContext.TraceID().String(), "span_id", spanContext.SpanID().String()}
+}
+
+func traceIDFromContext(ctx context.Context) string {
+	spanContext := trace.SpanContextFromContext(ctx)
+	if !spanContext.IsValid() {
+		return ""
+	}
+	return spanContext.TraceID().String()
+}
+
+func spanIDFromContext(ctx context.Context) string {
+	spanContext := trace.SpanContextFromContext(ctx)
+	if !spanContext.IsValid() {
+		return ""
+	}
+	return spanContext.SpanID().String()
+}

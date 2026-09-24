@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,7 +19,7 @@ type healthProbe struct {
 func TestCheckHealthUsesCurrentMCPDiscovery(t *testing.T) {
 	t.Parallel()
 
-	probe, runtime := newHealthTestRuntime(t, &mcp.ServerOptions{}, true)
+	probe, runtime := newHealthTestRuntime(t, &mcp.ServerOptions{}, "test_tool")
 	health := runtime.CheckHealth(context.Background())
 	if !health.OK {
 		t.Fatalf("CheckHealth() = %+v, want ready", health)
@@ -32,8 +33,8 @@ func TestCheckHealthUsesCurrentMCPDiscovery(t *testing.T) {
 	if probe.sawPing {
 		t.Error("health probe sent retired ping RPC")
 	}
-	if probe.requestedVersion != engineMCPProtocolVersion {
-		t.Fatalf("requested MCP version = %q, want %q", probe.requestedVersion, engineMCPProtocolVersion)
+	if probe.requestedVersion != engineMCPProtocolVersion() {
+		t.Fatalf("requested MCP version = %q, want %q", probe.requestedVersion, engineMCPProtocolVersion())
 	}
 }
 
@@ -46,7 +47,7 @@ func TestCheckHealthRejectsLegacyProtocolFallback(t *testing.T) {
 			Tools: &mcp.ToolCapabilities{},
 		},
 	}
-	_, runtime := newHealthTestRuntime(t, options, true)
+	_, runtime := newHealthTestRuntime(t, options, "test_tool")
 	health := runtime.CheckHealth(context.Background())
 	if health.OK {
 		t.Fatal("CheckHealth() accepted a legacy MCP negotiation")
@@ -57,14 +58,14 @@ func TestCheckHealthRejectsMissingToolCapability(t *testing.T) {
 	t.Parallel()
 
 	options := &mcp.ServerOptions{Capabilities: &mcp.ServerCapabilities{}}
-	_, runtime := newHealthTestRuntime(t, options, false)
+	_, runtime := newHealthTestRuntime(t, options, "")
 	health := runtime.CheckHealth(context.Background())
 	if health.OK {
 		t.Fatal("CheckHealth() accepted an Engine without tool capability")
 	}
 }
 
-func newHealthTestRuntime(t *testing.T, options *mcp.ServerOptions, withTool bool) (*healthProbe, *Runtime) {
+func newHealthTestRuntime(t *testing.T, options *mcp.ServerOptions, toolName string) (*healthProbe, *Runtime) {
 	t.Helper()
 
 	probe := &healthProbe{}
@@ -92,9 +93,9 @@ func newHealthTestRuntime(t *testing.T, options *mcp.ServerOptions, withTool boo
 			return next(ctx, method, request)
 		}
 	})
-	if withTool {
+	if toolName != "" {
 		server.AddTool(&mcp.Tool{
-			Name:        "bazi_chart",
+			Name:        toolName,
 			Description: "test deterministic chart",
 			InputSchema: &jsonschema.Schema{Type: "object"},
 		}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -110,5 +111,36 @@ func newHealthTestRuntime(t *testing.T, options *mcp.ServerOptions, withTool boo
 	return probe, &Runtime{config: Config{
 		EngineTimeout:           5 * time.Second,
 		engineTransportOverride: clientTransport,
+	}, entrypoint: &AgentDefinition{Name: "test-agent", Tools: ToolAllowlist{Allow: []string{toolName}}}}
+}
+
+func TestCheckHealthRejectsMissingAllowedTool(t *testing.T) {
+	t.Parallel()
+
+	_, runtime := newHealthTestRuntime(t, &mcp.ServerOptions{}, "available_tool")
+	runtime.entrypoint = &AgentDefinition{Name: "test-agent", Tools: ToolAllowlist{Allow: []string{"missing_tool"}}}
+	health := runtime.CheckHealth(context.Background())
+	if health.OK {
+		t.Fatal("CheckHealth() accepted an Engine missing an allowlisted tool")
+	}
+}
+
+func TestCheckHealthValidatesEveryAgentAllowlist(t *testing.T) {
+	t.Parallel()
+
+	_, runtime := newHealthTestRuntime(t, &mcp.ServerOptions{}, "available_tool")
+	runtime.config.Deployment = &Deployment{Spec: DeploymentSpec{
+		Agents: []AgentDefinition{
+			{Name: "entrypoint", Tools: ToolAllowlist{Allow: []string{"available_tool"}}},
+			{Name: "worker", Tools: ToolAllowlist{Allow: []string{"missing_tool"}}},
+		},
 	}}
+	health := runtime.CheckHealth(context.Background())
+	if health.OK {
+		t.Fatal("CheckHealth() validated only the entrypoint allowlist")
+	}
+	if !strings.Contains(health.Detail, `agent "worker"`) ||
+		!strings.Contains(health.Detail, `tool "missing_tool"`) {
+		t.Fatalf("health detail = %q, want missing agent and tool", health.Detail)
+	}
 }

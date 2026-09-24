@@ -1,0 +1,203 @@
+// Package audit defines the durable execution evidence contract used by the
+// Agent runtime. Audit events are immutable facts; they are not telemetry and
+// must never contain user prompts, model raw output, secrets, or tool payloads.
+package audit
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/ml8s/liki-agents/internal/domain"
+)
+
+const (
+	// SchemaV1 is the stable contract for all v1 audit events.
+	SchemaV1 = "audit.liki/v1"
+
+	EventRunStarted            EventType = "run.started"
+	EventRunCompleted          EventType = "run.completed"
+	EventRunFailed             EventType = "run.failed"
+	EventLLMCallStarted        EventType = "llm.call.started"
+	EventLLMCallCompleted      EventType = "llm.call.completed"
+	EventLLMCallFailed         EventType = "llm.call.failed"
+	EventToolCallStarted       EventType = "tool.call.started"
+	EventToolCallCompleted     EventType = "tool.call.completed"
+	EventToolCallFailed        EventType = "tool.call.failed"
+	EventDelegationStarted     EventType = "agent.delegation.started"
+	EventDelegationCompleted   EventType = "agent.delegation.completed"
+	EventDelegationFailed      EventType = "agent.delegation.failed"
+	EventOutputRejected        EventType = "output.rejected"
+	EventClarificationProduced EventType = "clarification.produced"
+	EventDefinitionLoadFailed  EventType = "definition.load.failed"
+)
+
+// EventType identifies a lifecycle fact. Event names are stable contracts.
+type EventType string
+
+// Status is the outcome represented by a lifecycle event.
+type Status string
+
+const (
+	StatusRunning   Status = "running"
+	StatusSucceeded Status = "succeeded"
+	StatusFailed    Status = "failed"
+)
+
+// Event is one immutable execution fact.
+type Event struct {
+	ID                    string
+	SchemaVersion         string
+	Type                  EventType
+	OccurredAt            time.Time
+	RootRunID             domain.ID
+	RunID                 domain.ID
+	ParentRunID           domain.ID
+	ThreadID              domain.ID
+	UserID                string
+	Protocol              string
+	TraceID               string
+	SpanID                string
+	AgentName             string
+	DefinitionName        string
+	DefinitionVersion     string
+	DefinitionDigest      string
+	AgentVersion          string
+	AgentDefinitionDigest string
+	CallerAgent           string
+	TargetAgent           string
+	DelegationDepth       int
+	ToolCallID            string
+	ToolName              string
+	Model                 string
+	Provider              string
+	Status                Status
+	DurationMS            int64
+	ErrorCode             string
+	ErrorMessage          string
+	Payload               map[string]any
+}
+
+func (e *Event) Normalize() {
+	e.ID = strings.TrimSpace(e.ID)
+	e.SchemaVersion = strings.TrimSpace(e.SchemaVersion)
+	e.Type = EventType(strings.TrimSpace(string(e.Type)))
+	e.UserID = strings.TrimSpace(e.UserID)
+	e.Protocol = strings.TrimSpace(e.Protocol)
+	e.TraceID = strings.ToLower(strings.TrimSpace(e.TraceID))
+	e.SpanID = strings.ToLower(strings.TrimSpace(e.SpanID))
+	e.AgentName = strings.TrimSpace(e.AgentName)
+	e.AgentVersion = strings.TrimSpace(e.AgentVersion)
+	e.CallerAgent = strings.TrimSpace(e.CallerAgent)
+	e.TargetAgent = strings.TrimSpace(e.TargetAgent)
+	e.ToolName = strings.TrimSpace(e.ToolName)
+	e.Model = strings.TrimSpace(e.Model)
+	e.Provider = strings.TrimSpace(e.Provider)
+	e.ErrorCode = strings.TrimSpace(e.ErrorCode)
+}
+
+func (e *Event) Validate() error {
+	e.Normalize()
+	switch {
+	case e.ID == "":
+		return NewError(CodeIDRequired, "audit event id is required")
+	case e.SchemaVersion != SchemaV1:
+		return NewError(CodeSchemaUnsupported, "unsupported audit event schema", fmt.Errorf("%q", e.SchemaVersion))
+	case e.Type == "":
+		return NewError(CodeTypeRequired, "audit event type is required")
+	case e.OccurredAt.IsZero():
+		return NewError(CodeOccurredAtRequired, "audit event occurred_at is required")
+	case e.RunID == "":
+		return NewError(CodeRunIDRequired, "audit event run id is required")
+	case e.RootRunID == "":
+		return NewError(CodeRootRunIDRequired, "audit event root run id is required")
+	}
+
+	if e.DelegationDepth < 0 {
+		return NewError(CodeInvalidDelegationDepth, "audit event delegation depth must not be negative")
+	}
+
+	var validStatus bool
+	switch e.Status {
+	case "", StatusRunning, StatusSucceeded, StatusFailed:
+		validStatus = true
+	}
+	if !validStatus {
+		return NewError(CodeStatusInvalid, "invalid audit event status")
+	}
+
+	if e.DurationMS < 0 {
+		return NewError(CodeInvalidDuration, "audit event duration must not be negative")
+	}
+	if err := validateTraceIDs(e.TraceID, e.SpanID); err != nil {
+		return err
+	}
+
+	switch e.Type {
+	case EventToolCallStarted, EventToolCallCompleted, EventToolCallFailed:
+		if e.ToolCallID == "" {
+			return NewError(CodeToolCallIDRequired, "tool audit event call id is required")
+		}
+		if e.ToolName == "" {
+			return NewError(CodeToolNameRequired, "tool audit event tool name is required")
+		}
+	}
+
+	if e.Type == EventToolCallFailed && e.ErrorCode == "" {
+		return NewError(CodeToolExecutionFailed, "tool failure audit event requires an error code")
+	}
+	return nil
+}
+
+func validateTraceIDs(traceID string, spanID string) error {
+	if traceID == "" && spanID == "" {
+		return nil
+	}
+	if len(traceID) != 32 || strings.ToLower(traceID) != traceID || !isHex(traceID) {
+		return NewError(CodeTraceIDInvalid, "audit event trace id must be 32 lowercase hex characters")
+	}
+	if len(spanID) != 16 || strings.ToLower(spanID) != spanID || !isHex(spanID) {
+		return NewError(CodeSpanIDInvalid, "audit event span id must be 16 lowercase hex characters")
+	}
+	return nil
+}
+
+func isHex(value string) bool {
+	for _, char := range value {
+		switch char {
+		case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func NewError(code string, message string, cause ...error) error {
+	var wrapped error
+	if len(cause) > 0 {
+		wrapped = cause[0]
+	}
+	return domain.NewError(code, message, wrapped)
+}
+
+// Common audit error codes. They live beside the event contract so all audit
+// adapters return the same stable identifiers.
+const (
+	CodeIDRequired             = "audit_event_id_required"
+	CodeSchemaUnsupported      = "audit_event_schema_unsupported"
+	CodeTypeRequired           = "audit_event_type_required"
+	CodeOccurredAtRequired     = "audit_event_occurred_at_required"
+	CodeRunIDRequired          = "audit_event_run_id_required"
+	CodeRootRunIDRequired      = "audit_event_root_run_id_required"
+	CodeInvalidDelegationDepth = "audit_event_delegation_depth_invalid"
+	CodeStatusInvalid          = "audit_event_status_invalid"
+	CodeInvalidDuration        = "audit_event_duration_invalid"
+	CodeTraceIDInvalid         = "audit_event_trace_id_invalid"
+	CodeSpanIDInvalid          = "audit_event_span_id_invalid"
+	CodeToolCallIDRequired     = "audit_event_tool_call_id_required"
+	CodeToolNameRequired       = "audit_event_tool_name_required"
+	CodeToolExecutionFailed    = "audit_event_tool_execution_failed"
+	CodeRecorderRequired       = "audit_recorder_required"
+	CodeAuditAppendFailed      = "audit_append_failed"
+)

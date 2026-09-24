@@ -2,36 +2,59 @@
 
 ## System boundary
 
-`liki-agent` is a standalone agent runtime. `liki-web` owns users,
+`liki-agents` is a generic multi-agent runtime. `liki-web` owns users,
 authentication, products, payments, entitlements, quota, and durable product
-conversations. `liki-engine` owns deterministic destiny computation.
+conversations. The Liki skill/project owns prompts, skills, domain policy, and
+tool semantics. Engine exposes deterministic tools through MCP.
 
 ```text
 Server / machine client
   ↓ A2A JSON-RPC
 ┌────────────┐   MCP Streamable HTTP
-│ liki-agent │──────────────────────→ liki-engine
+│ liki-agents │──────────────────────→ Engine / tools
 └────────────┘
   ↑ AG-UI SSE
 liki-web gateway
 ```
 
-The service has one execution path and no private `/v1` application API.
+There is one execution path and no private `/v1` application API.
+
+## AgentDeployment
+
+The runtime starts from an external `AgentDeployment` artifact. The artifact is
+an ADK Agent tree: it may contain one or more Agent definitions, and its unique
+incoming-edge-free Agent is the entrypoint. Each Agent definition supplies:
+
+- instruction text file;
+- optional JSON Schema for structured output;
+- paired JSON Pointer selecting the user-facing text when structured output is
+  declared;
+- MCP tool allowlist;
+- standard ADK delegation mode and `sub_agents`;
+- version.
+
+Prompt, output schema, and tool semantics are not built into Go.
+The manifest is validated against the canonical JSON Schema 2020-12 contract
+before graph and file semantics are evaluated.
+The deployment digest covers the manifest plus resolved instruction and output
+schema artifacts and the ADK graph semantics; it is not a hash of the manifest
+alone.
 
 ## Principles
 
 1. A2A and AG-UI are standard protocol adapters over one shared runtime.
 2. Google ADK Go v2 owns the model/tool execution graph.
-3. Engine MCP is the only boundary to deterministic calculation.
-4. Every Engine tool call is constrained by an explicit allowlist.
-5. SQLite stores only the LLM audit ledger.
+3. MCP is the only boundary to external deterministic tools.
+4. Every tool call is constrained by the Agent's explicit allowlist.
+5. Audit is append-only execution evidence.
 6. `internal/domain` remains free of transport, provider, adapter, and storage
    imports.
+7. Standard libraries and framework APIs are preferred over local equivalents.
 
 ## Dependencies and modules
 
 ```text
-cmd/agent
+cmd/liki-agents
   → internal/transport
   → internal/protocol/a2a
   → internal/protocol/agui
@@ -39,117 +62,122 @@ cmd/agent
   → Engine MCP / model provider
 
 internal/audit/sqlite
+  → internal/audit
   → internal/domain
 
 internal/observability/prometheus
   → observability interfaces
 ```
 
-Protocol adapters never import each other. The agent never imports a protocol
-package. Database technology is confined to `internal/audit/sqlite`.
+Protocol adapters never import each other. Database technology is confined to
+`internal/audit/sqlite`.
 
 | Module | Responsibility |
 |---|---|
 | `internal/protocol/a2a` | Agent Card and official A2A JSON-RPC binding |
 | `internal/protocol/agui` | Official AG-UI request decoding and SSE binding |
-| `internal/agent` | Single ADK graph, model adapter, MCP tools, structured output, audit hooks |
-| `internal/domain` | Stable opinions, audit records, errors, and invariants |
-| `internal/audit/sqlite` | Migration and persistence for `agent_llm_calls` |
-| `internal/observability` | Metric interfaces; Prometheus is the only exporter |
-| `internal/platform` | Configuration, identity, health contracts, and build metadata |
+| `internal/agent` | AgentDeployment loader, ADK graph, model adapter, MCP tools, audit hooks |
+| `internal/domain` | Runtime audit and validation contracts |
+| `internal/audit` | Immutable audit event contract and recorder port |
+| `internal/audit/sqlite` | Append-only audit persistence |
+| `internal/observability` | Metric interfaces |
+| `internal/observability/prometheus` | Prometheus implementation |
+| `internal/platform` | Configuration, identity, health contracts, build metadata |
 | `internal/transport` | Routes, bearer auth, identity propagation, body limit, readiness |
 
 ## Runtime execution
 
-Each protocol request is mapped to one agent `RunRequest` and one run-scoped
-ADK session. Protocol callers may pass prior history, but the agent does not
-store product conversation history.
+A protocol request is mapped to a generic `RunRequest`. History and opaque
+protocol context may be supplied by the caller; the runtime does not store
+product conversation state.
 
-The runtime uses the official ADK OpenAI-compatible model integration. Zhipu /
-BigModel uses provider-safe JSON-object mode while retaining the same
-structured output contract. OpenAI-compatible providers can use native JSON
-schema mode. Provider differences do not enter the domain or protocol layers.
+The entrypoint `AgentDefinition` supplies instruction, an optional output
+schema, and the tool allowlist. Plain text is the default. When structured
+output is declared, the runtime uses ADK's OpenAI-compatible model integration
+and selects either native JSON schema or provider-safe JSON object mode.
 
-The Engine toolset is consumed through MCP Streamable HTTP and filtered by
-`LIKI_ENGINE_ALLOWED_TOOLS`. Tool calls and responses become protocol facts and
-`source_tools`; model assertions do not create tool provenance.
+Engine tools are consumed through MCP Streamable HTTP and filtered by the
+AgentDefinition allowlist. Tool calls and responses become protocol facts and
+execution evidence; model assertions do not create tool provenance.
 
-The model must produce a structured analysis. ADK validates the output schema
-and stores the normalized result in run-scoped session state. The runtime maps
-that result to `domain.ExpertOpinion`. Raw model JSON is not emitted to protocol
-observers. Partial events are suppressed, so a tool call is emitted once with
-its final arguments and result.
+Raw structured model output is not emitted to protocol observers. Partial
+events are suppressed. A structured Agent returns validated generic JSON plus
+the user-facing text selected by its configured JSON Pointer; a plain-text
+Agent returns final model text directly.
 
 ## Protocols
 
-### A2A
+A2A uses the official A2A Go SDK JSON-RPC binding and ADK A2A executor.
 
-```text
-GET  /.well-known/agent-card.json
-POST /a2a
-```
-
-A2A uses the official A2A Go SDK JSON-RPC binding and ADK A2A executor. The
-Agent Card declares JSONRPC transport, streaming support, and bearer security.
-A2A is intended for server or machine callers.
-
-### AG-UI
-
-```text
-POST /ag-ui
-Content-Type: application/json
-Accept: text/event-stream
-```
+Google ADK is the internal execution runtime, not the public control plane. The
+ADK Launcher/REST API is intentionally not exposed. External clients use only
+the standard protocol surfaces above; MCP readiness is exercised at startup and
+on `/readyz`.
 
 AG-UI decodes the official `RunAgentInput` and emits official SSE events. The
-supported profile is text chat. Unsupported capabilities are rejected, not
-silently ignored. Engine tools are server-owned; client tools and multimodal
-inputs are outside the profile.
+supported profile is text chat; unsupported capabilities are rejected rather
+than silently ignored.
+
+Event mapping:
 
 | Runtime fact | AG-UI event |
 |---|---|
 | accepted run | `RUN_STARTED` |
+| sub-agent start | `SUBAGENT_STARTED` |
+| sub-agent end | `SUBAGENT_FINISHED` |
+| sub-agent failure | `SUBAGENT_ERROR` |
 | Engine call | `TOOL_CALL_START` / `TOOL_CALL_ARGS` |
 | Engine response | `TOOL_CALL_RESULT` / `TOOL_CALL_END` |
 | final answer | `TEXT_MESSAGE_START` / `TEXT_MESSAGE_CONTENT` / `TEXT_MESSAGE_END` |
 | success | `RUN_FINISHED` |
 | failure | `RUN_ERROR` |
 
-The final structured answer is attached to `RUN_FINISHED`. A run never emits
-`RUN_ERROR` after `RUN_FINISHED`.
+`RUN_FINISHED` contains the AgentDefinition reference and validated output. A
+run never emits `RUN_ERROR` after `RUN_FINISHED`.
+
+The A2A Agent Card uses curated `AgentDefinition` descriptions, mode, tool
+allowlist tags, and deployment provenance. It never includes instructions,
+prompts, raw model output, or tool payloads.
 
 ## Operations
 
-### Public endpoints
+Health, version, readiness, and metrics are standard transport endpoints. All
+POST endpoints enforce a 2 MB body limit.
 
-```text
-GET  /healthz
-GET  /readyz
-GET  /version
-GET  /metrics
-```
-
-All POST endpoints enforce a 2 MB body limit.
-
-Readiness checks SQLite and Engine MCP through the official MCP initialization
-handshake. It requires the configured MCP revision, server identity, and tool
-capability. It does not use a legacy Engine HTTP health endpoint or the retired
-MCP `ping` RPC.
-
-### Observability and audit
+Readiness checks SQLite and Engine MCP through the official MCP discovery RPC.
+It requires the configured MCP revision, server identity, and tool capability.
 
 Prometheus exposes protocol request count and duration, active streams, LLM
-calls and tokens, and dependency readiness. Structured logging uses `log/slog`
-with stable event names. Logs do not contain user prompts or raw model output.
+calls and tokens, tool calls and duration, and dependency readiness. Structured
+logging uses `log/slog` with stable event names. Logs do not contain user prompts,
+raw model output, or tool payloads.
 
-Completed and failed LLM calls are recorded in SQLite WAL mode. The audit
-ledger records usage and version evidence, but not product conversation state.
-In-flight runs are not recoverable after a process crash; the client starts a
-new run.
+Audit events are append-only SQLite records. They contain execution metadata,
+digests, versions, status, duration, and error codes—not conversation or domain
+payloads. In-flight runs are not recoverable after crash; clients start a new
+run.
 
-### Error model
+## Observability and audit implementation
 
-Stable error codes are constants in `internal/domain/error_codes.go`. Runtime
-and audit failures use domain codes; HTTP transport validation returns a small
-JSON error envelope with a stable code. A2A failures remain native A2A/JSON-RPC
-errors and AG-UI failures remain AG-UI events.
+The system separates telemetry from durable evidence:
+
+- Prometheus exports aggregate metrics.
+- `log/slog` emits structured operational logs.
+- OpenTelemetry emits distributed traces over the standard OTLP protocol.
+- SQLite stores immutable audit events.
+
+ADK emits standard spans for Agent invocation, model generation, delegation, and
+tool execution. The runtime adds an `agent.run` span and propagates W3C trace
+context. Trace IDs and span IDs are also stored on audit events so a compliance
+record can be correlated with its distributed trace without duplicating payloads.
+
+OpenTelemetry is enabled only when a standard OTLP endpoint is present:
+
+```text
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://otel-collector:4318/v1/traces
+```
+
+Sampling follows standard `OTEL_TRACES_SAMPLER` and
+`OTEL_TRACES_SAMPLER_ARG` variables.
+
+Stable error codes live in `internal/domain/error_codes.go`.

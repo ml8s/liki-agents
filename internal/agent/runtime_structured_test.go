@@ -2,192 +2,127 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"iter"
-	"net"
-	"net/http"
-	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
-	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/liki/liki-agent/internal/domain"
+	"github.com/ml8s/liki-agents/internal/audit"
+	"github.com/ml8s/liki-agents/internal/domain"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/genai"
 )
 
-func TestStructuredOutputSchemaContract(t *testing.T) {
-	schema := structuredOutputSchema()
-	expected := []string{"answer", "confidence", "topic", "key_factors", "limitations"}
-	if len(schema.Required) != len(expected) {
-		t.Fatalf("required fields = %v, want %v", schema.Required, expected)
-	}
-	for _, field := range expected {
-		if schema.Properties[field] == nil {
-			t.Fatalf("schema is missing %q", field)
-		}
-	}
-	if got := schema.Properties["confidence"].Type; got != genai.TypeNumber {
-		t.Fatalf("confidence type = %q, want number", got)
-	}
-	if got := schema.Properties["key_factors"].Items.Type; got != genai.TypeString {
-		t.Fatalf("key_factors item type = %q, want string", got)
-	}
-	if got := schema.Properties["answer"].MinLength; got == nil || *got != 1 {
-		t.Fatalf("answer min length = %v, want 1", got)
-	}
-}
+var (
+	testDeploymentOnce  sync.Once
+	testDeploymentValue *Deployment
+	testDeploymentErr   error
+)
 
-type fakeSessionState struct {
-	values map[string]any
-}
-
-func (s *fakeSessionState) Get(key string) (any, error) {
-	value, ok := s.values[key]
-	if !ok {
-		return nil, session.ErrStateKeyNotExist
+func buildTestDeployment() (*Deployment, error) {
+	root, err := os.MkdirTemp("", "liki-agents-deployment-")
+	if err != nil {
+		return nil, err
 	}
-	return value, nil
-}
-
-func (s *fakeSessionState) Set(key string, value any) error {
-	s.values[key] = value
-	return nil
-}
-
-func (s *fakeSessionState) All() iter.Seq2[string, any] {
-	return func(yield func(string, any) bool) {
-		for key, value := range s.values {
-			if !yield(key, value) {
-				return
+	defer os.RemoveAll(root)
+	files := map[string]string{
+		"agent-deployment.json": `{
+			"apiVersion": "agent.liki/v1",
+			"kind": "AgentDeployment",
+			"metadata": {"name": "test-agent", "version": "1.0.0"},
+			"spec": {
+				"agents": [{
+					"name": "main",
+					"version": "1.0.0",
+					"description": "generic test agent",
+					"mode": "chat",
+					"sub_agents": [],
+					"instruction": {"path": "instruction.md"},
+					"output": {
+						"schema": {"path": "output.schema.json"},
+						"textPointer": "/answer"
+					},
+					"tools": {"allow": ["test_tool"]}
+									}]
 			}
+		}`,
+		"instruction.md": "You are a generic test agent.",
+		"output.schema.json": `{
+			"$schema": "https://json-schema.org/draft/2020-12/schema",
+			"type": "object",
+			"additionalProperties": false,
+			"required": ["answer"],
+			"properties": {
+				"answer": {"type": "string", "minLength": 1},
+				"confidence": {"type": "number", "minimum": 0, "maximum": 1}
+			}
+		}`,
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0600); err != nil {
+			return nil, err
 		}
 	}
+	return LoadAgentDeployment(filepath.Join(root, "agent-deployment.json"))
 }
 
-type fakeSession struct {
-	state session.State
-}
-
-func (s *fakeSession) ID() string                { return "session_1" }
-func (s *fakeSession) AppName() string           { return "liki-agent" }
-func (s *fakeSession) UserID() string            { return "user_1" }
-func (s *fakeSession) State() session.State      { return s.state }
-func (s *fakeSession) Events() session.Events    { return nil }
-func (s *fakeSession) LastUpdateTime() time.Time { return time.Time{} }
-
-type fakeSessionService struct {
-	session.Service
-	state session.State
-}
-
-func (s *fakeSessionService) Get(context.Context, *session.GetRequest) (*session.GetResponse, error) {
-	return &session.GetResponse{Session: &fakeSession{state: s.state}}, nil
-}
-
-func TestRuntimeLoadsStructuredOutputFromSessionState(t *testing.T) {
-	runtime := &Runtime{
-		config: Config{AppName: "liki-agent"},
-		sessions: &fakeSessionService{state: &fakeSessionState{values: map[string]any{
-			structuredOutputStateKey: map[string]any{
-				"answer":      "The chart shows pressure, not certainty.",
-				"confidence":  0.82,
-				"topic":       "career",
-				"key_factors": []any{"seven killings is heavy"},
-				"limitations": []any{"not financial advice"},
-			},
-		}}},
-	}
-	state := &runState{request: RunRequest{RunID: "run_1", ThreadID: "thread_1", UserID: "user_1"}}
-	if err := runtime.loadStructuredAnalysis(context.Background(), state.request, "session_1", state); err != nil {
-		t.Fatalf("loadStructuredAnalysis() error = %v", err)
-	}
-	if state.analysis == nil {
-		t.Fatal("analysis was not loaded from session state")
-	}
-	if state.analysis.Answer != "The chart shows pressure, not certainty." || state.analysis.Topic != "career" || state.analysis.Confidence != 0.82 {
-		t.Fatalf("analysis = %+v", state.analysis)
-	}
-}
-
-func TestRunStateSuppressesStructuredPartialJSON(t *testing.T) {
-	state := &runState{structured: true}
-	first := &session.Event{
-		LLMResponse: model.LLMResponse{
-			Partial: true,
-			Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: `{"answer":"par`}}},
-		},
-	}
-	second := &session.Event{
-		LLMResponse: model.LLMResponse{
-			Partial: true,
-			Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: `tial"}"`}}},
-		},
-	}
-	if err := state.consume(first); err != nil {
-		t.Fatalf("first consume() error = %v", err)
-	}
-	if err := state.consume(second); err != nil {
-		t.Fatalf("second consume() error = %v", err)
-	}
-	if state.final.Len() != 0 {
-		t.Fatalf("raw structured partial was retained: %q", state.final.String())
-	}
+func testDeployment() (*Deployment, error) {
+	return buildTestDeployment()
 }
 
 func TestRunStateRejectsInvalidStructuredOutput(t *testing.T) {
 	state := &runState{}
-	err := state.consumeStructuredOutput(map[string]any{"confidence": 0.9})
+	deployment := NewTestDeployment(t)
+	entrypoint, err := deployment.EntrypointDefinition()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = state.consumeStructuredOutput(map[string]any{"unexpected": true}, entrypoint)
 	var domainErr *domain.Error
-	if !errors.As(err, &domainErr) || domainErr.Code != "structured_output_empty" {
-		t.Fatalf("consumeStructuredOutput() error = %v, want structured_output_empty", err)
+	if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeStructuredOutputInvalid {
+		t.Fatalf("consumeStructuredOutput() error = %v, want %s", err, domain.CodeStructuredOutputInvalid)
 	}
 }
 
-func TestVisibleEventStripsStructuredPayloadText(t *testing.T) {
-	event := &session.Event{
-		LLMResponse: model.LLMResponse{
-			Partial: true,
-			Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: `{"answer":"par`}}},
-		},
+func TestVisibleEventFiltersObserverFacts(t *testing.T) {
+	toolCall := &genai.Part{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "test_tool"}}
+	testCases := []struct {
+		name    string
+		event   *session.Event
+		wantNil bool
+	}{
+		{name: "partial payload", event: &session.Event{
+			LLMResponse: model.LLMResponse{Partial: true, Content: &genai.Content{Parts: []*genai.Part{{Text: `{"answer":"par`}}}},
+		}, wantNil: true},
+		{name: "partial tool call", event: &session.Event{
+			LLMResponse: model.LLMResponse{Partial: true, Content: &genai.Content{Parts: []*genai.Part{toolCall}}},
+		}, wantNil: true},
+		{name: "final payload with tool fact", event: &session.Event{
+			LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: `{"answer":"raw"}`}, toolCall}}},
+		}},
 	}
-	visible := visibleEvent(event)
-	if visible != nil {
-		t.Fatalf("visible event = %+v, want nil for pure payload text", visible)
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			visible := visibleEvent(testCase.event)
+			if testCase.wantNil {
+				if visible != nil {
+					t.Fatalf("visible event = %+v, want nil", visible)
+				}
+				return
+			}
+			if visible == nil || len(visible.Content.Parts) != 1 || visible.Content.Parts[0].FunctionCall == nil {
+				t.Fatalf("visible event = %+v, want one function call", visible)
+			}
+		})
 	}
-}
-
-func TestVisibleEventKeepsToolFactsAndDropsPayloadText(t *testing.T) {
-	event := &session.Event{
-		LLMResponse: model.LLMResponse{
-			Content: &genai.Content{Role: "model", Parts: []*genai.Part{
-				{Text: `{"answer":"raw"}`},
-				{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "bazi_chart"}},
-			}},
-		},
-	}
-	visible := visibleEvent(event)
-	if visible == nil {
-		t.Fatal("visible event was nil, want tool facts")
-	}
-	if len(visible.Content.Parts) != 1 || visible.Content.Parts[0].FunctionCall == nil {
-		t.Fatalf("visible parts = %+v, want only the function call", visible.Content.Parts)
-	}
-}
-
-// newStubEngineMCP serves a real in-process Engine MCP so the ADK toolset can
-// list tools exactly as it does in production. The deterministic tool is never
-// invoked because the fake model never emits a function call.
-func newStubEngineMCP() http.Handler {
-	server := mcp.NewServer(&mcp.Implementation{Name: "stub-engine", Version: "v1"}, nil)
-	server.AddTool(&mcp.Tool{Name: "bazi_chart", Description: "stub deterministic chart", InputSchema: &jsonschema.Schema{Type: "object"}}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		return &mcp.CallToolResult{}, nil
-	})
-	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil)
 }
 
 type fakeLLM struct {
@@ -211,21 +146,110 @@ func (f *fakeLLM) GenerateContent(context.Context, *model.LLMRequest, bool) iter
 }
 
 type recordingAudit struct {
-	starts   int
-	finishes int
-	last     *domain.LLMCall
+	mu     sync.Mutex
+	events []audit.Event
 }
 
-func (r *recordingAudit) Start(_ context.Context, call *domain.LLMCall) error {
-	r.starts++
-	r.last = call
+func (r *recordingAudit) Record(_ context.Context, event *audit.Event) error {
+	if event == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, *event)
 	return nil
 }
 
-func (r *recordingAudit) Finish(_ context.Context, call *domain.LLMCall) error {
-	r.finishes++
-	r.last = call
-	return nil
+func (r *recordingAudit) eventsOfType(eventType audit.EventType) []audit.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([]audit.Event, 0)
+	for _, event := range r.events {
+		if event.Type == eventType {
+			result = append(result, event)
+		}
+	}
+	return result
+}
+
+// newTestRuntime wires a fake model and an in-memory MCP Engine. This avoids
+// network dependencies while retaining ADK's real runner and toolset contract.
+func newTestRuntime(t *testing.T, deployment *Deployment, events *recordingAudit, llm *fakeLLM) *Runtime {
+	t.Helper()
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	server := mcp.NewServer(&mcp.Implementation{Name: "stub-engine", Version: "test"}, nil)
+	server.AddTool(
+		&mcp.Tool{Name: "test_tool", InputSchema: &jsonschema.Schema{Type: "object"}},
+		func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return &mcp.CallToolResult{}, nil
+		},
+	)
+	serverSession, err := server.Connect(context.Background(), serverTransport, nil)
+	if err != nil {
+		t.Fatalf("connect test Engine: %v", err)
+	}
+	t.Cleanup(func() { _ = serverSession.Close() })
+	entrypoint, err := deployment.EntrypointDefinition()
+	if err != nil {
+		t.Fatalf("select entrypoint: %v", err)
+	}
+	structuredOutput := StructuredOutputNone
+	if entrypoint.Output.Structured() {
+		structuredOutput = StructuredOutputJSONSchema
+	}
+	runtime, err := NewRuntime(Config{
+		Model:                   "fake-model",
+		Deployment:              deployment,
+		StructuredOutput:        structuredOutput,
+		EngineMCPURL:            "in-memory://test-engine",
+		AuditRecorder:           events,
+		ContractVersion:         "test-contract",
+		modelOverride:           llm,
+		engineTransportOverride: clientTransport,
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime() error = %v", err)
+	}
+	return runtime
+}
+
+func plainTestDeployment(t *testing.T) *Deployment {
+	t.Helper()
+	deployment := NewTestDeployment(t)
+	for index := range deployment.Spec.Agents {
+		deployment.Spec.Agents[index].Output = OutputDefinition{}
+		deployment.Spec.Agents[index].OutputSchema = nil
+		deployment.Spec.Agents[index].ResolvedOutput = nil
+		deployment.Spec.Agents[index].GenaiOutputSchema = nil
+		deployment.Spec.Agents[index].SchemaDigest = ""
+	}
+	if err := deployment.validate(); err != nil {
+		t.Fatalf("validate plain deployment: %v", err)
+	}
+	return deployment
+}
+
+func TestRuntimeRunReturnsPlainTextForGenericAgent(t *testing.T) {
+	answer := "generic plain-text answer"
+	events := &recordingAudit{}
+	runtime := newTestRuntime(t, plainTestDeployment(t), events, &fakeLLM{responses: []*model.LLMResponse{{
+		Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: answer}}},
+	}}})
+	result, err := runtime.Run(context.Background(), RunRequest{
+		RunID: "run_plain", ThreadID: "thread_plain", UserID: "user_1", UserMessage: "hello",
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Text != answer {
+		t.Fatalf("Text = %q, want %q", result.Text, answer)
+	}
+	if len(result.Output) != 0 {
+		t.Fatalf("Output = %s, want empty", result.Output)
+	}
+	if got := len(events.eventsOfType(audit.EventRunCompleted)); got != 1 {
+		t.Fatalf("completed run audit events = %d, want 1", got)
+	}
 }
 
 // TestRuntimeRunProducesStructuredAnswerWithoutPayloadLeak is the keystone
@@ -234,34 +258,11 @@ func (r *recordingAudit) Finish(_ context.Context, call *domain.LLMCall) error {
 // from session state, must never expose payload JSON to protocol observers,
 // and must still persist the LLM audit lifecycle.
 func TestRuntimeRunProducesStructuredAnswerWithoutPayloadLeak(t *testing.T) {
-	payload := `{"answer":"八字显示压力而非确定性。","confidence":0.82,"topic":"career","key_factors":["七杀重"],"limitations":["非投资建议"]}`
-	audit := &recordingAudit{}
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Skipf("network listen unavailable in this environment: %v", err)
-	}
-	engine := &httptest.Server{
-		Listener: listener,
-		Config:   &http.Server{Handler: newStubEngineMCP()},
-	}
-	engine.Start()
-	t.Cleanup(func() {
-		engine.CloseClientConnections()
-		engine.Close()
-	})
-	runtime, err := NewRuntime(Config{
-		Model:           "fake-model",
-		AllowedTools:    []string{"bazi_chart"},
-		EngineMCPURL:    engine.URL,
-		LLMRecorder:     audit,
-		ContractVersion: "test-contract",
-		modelOverride: &fakeLLM{responses: []*model.LLMResponse{{
-			Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: payload}}},
-		}}},
-	})
-	if err != nil {
-		t.Fatalf("NewRuntime() error = %v", err)
-	}
+	payload := `{"answer":"八字显示压力而非确定性。","confidence":0.82}`
+	events := &recordingAudit{}
+	runtime := newTestRuntime(t, NewTestDeployment(t), events, &fakeLLM{responses: []*model.LLMResponse{{
+		Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: payload}}},
+	}}})
 
 	observed := make([]*session.Event, 0)
 	result, err := runtime.Run(context.Background(), RunRequest{
@@ -280,110 +281,100 @@ func TestRuntimeRunProducesStructuredAnswerWithoutPayloadLeak(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	if result.FinalContent != "八字显示压力而非确定性。" {
-		t.Fatalf("FinalContent = %q, want the parsed answer", result.FinalContent)
+	if result.Text != "八字显示压力而非确定性。" {
+		t.Fatalf("Text = %q, want the parsed answer", result.Text)
 	}
-	if len(result.ExpertOpinions) != 1 {
-		t.Fatalf("expert opinions = %d, want 1", len(result.ExpertOpinions))
+	if result.Definition.Name != "test-agent" || result.Definition.Version != "1.0.0" {
+		t.Fatalf("definition ref = %+v", result.Definition)
 	}
-	opinion := result.ExpertOpinions[0]
-	if opinion.Confidence != 0.82 || opinion.Topic != "career" {
-		t.Fatalf("opinion confidence/topic = %v/%q", opinion.Confidence, opinion.Topic)
-	}
-	if structured, ok := opinion.Metadata["structured"].(bool); !ok || !structured {
-		t.Fatalf("opinion structured metadata = %v", opinion.Metadata["structured"])
+	var output map[string]any
+	if err := json.Unmarshal(result.Output, &output); err != nil {
+		t.Fatalf("decode output: %v", err)
 	}
 	for index, event := range observed {
-		if event.Content != nil && textFromContent(event.Content) != "" {
-			t.Fatalf("observed[%d] leaks model payload text %q", index, textFromContent(event.Content))
+		if event.Content == nil {
+			continue
+		}
+		for _, part := range event.Content.Parts {
+			if part != nil && part.Text != "" && !part.Thought {
+				t.Fatalf("observed[%d] leaks model payload text %q", index, part.Text)
+			}
 		}
 	}
-	if audit.starts != 1 || audit.finishes != 1 {
-		t.Fatalf("audit lifecycle = %d starts / %d finishes, want 1/1", audit.starts, audit.finishes)
+	for _, eventType := range []audit.EventType{
+		audit.EventRunStarted,
+		audit.EventLLMCallStarted,
+		audit.EventLLMCallCompleted,
+		audit.EventRunCompleted,
+	} {
+		if got := len(events.eventsOfType(eventType)); got != 1 {
+			t.Fatalf("%s audit events = %d, want 1", eventType, got)
+		}
 	}
-	if audit.last == nil || audit.last.Status != domain.LLMCallCompleted {
-		t.Fatalf("audit last call = %+v, want completed", audit.last)
-	}
-	if audit.last != nil && audit.last.RunID != "run_1" {
-		t.Fatalf("audit run id = %q", audit.last.RunID)
-	}
-	if strings.Contains(result.FinalContent, "answer") {
-		t.Fatal("FinalContent still contains JSON payload markers")
+	if strings.Contains(result.Text, `\"answer\"`) {
+		t.Fatal("answer still contains JSON payload markers")
 	}
 }
 
 func TestRuntimeRunEmptyResponse(t *testing.T) {
-	audit := &recordingAudit{}
-	engine := newTestEngine(t)
-	runtime, err := NewRuntime(Config{
-		Model:           "fake-model",
-		AllowedTools:    []string{"bazi_chart"},
-		EngineMCPURL:    engine.URL,
-		LLMRecorder:     audit,
-		ContractVersion: "test-contract",
-		modelOverride: &fakeLLM{responses: []*model.LLMResponse{{
-			Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: ""}}},
-		}}},
-	})
-	if err != nil {
-		t.Fatalf("NewRuntime() error = %v", err)
-	}
+	events := &recordingAudit{}
+	runtime := newTestRuntime(t, NewTestDeployment(t), events, &fakeLLM{responses: []*model.LLMResponse{{
+		Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: ""}}},
+	}}})
 	_, runErr := runtime.Run(context.Background(), RunRequest{
 		RunID: "run_empty", ThreadID: "thread_1", UserID: "user_1", UserMessage: "看事业",
 	}, nil)
 	var domainErr *domain.Error
-	if !errors.As(runErr, &domainErr) || domainErr.Code != "runtime_empty_response" {
-		t.Fatalf("Run() error = %v, want runtime_empty_response", runErr)
+	if !errors.As(runErr, &domainErr) || domainErr.Code != domain.CodeRuntimeEmptyResponse {
+		t.Fatalf("Run() error = %v, want %s", runErr, domain.CodeRuntimeEmptyResponse)
 	}
-	if audit.last != nil && audit.last.Status != domain.LLMCallCompleted {
-		t.Fatalf("audit status = %s, want completed", audit.last.Status)
+	if got := len(events.eventsOfType(audit.EventRunFailed)); got != 1 {
+		t.Fatalf("failed run audit events = %d, want 1", got)
+	}
+}
+
+func TestRuntimeRunMarksObserverFailureAsFailedRun(t *testing.T) {
+	observerErr := errors.New("protocol write failed")
+	events := &recordingAudit{}
+	runtime := newTestRuntime(t, NewTestDeployment(t), events, &fakeLLM{responses: []*model.LLMResponse{{
+		Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+			{Text: `{"answer":"ok"}`},
+			{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "test_tool"}},
+		}},
+	}}})
+	_, runErr := runtime.Run(context.Background(), RunRequest{
+		RunID: "run_observer", ThreadID: "thread_1", UserID: "user_1", UserMessage: "test",
+	}, func(*session.Event) error {
+		return observerErr
+	})
+	if !errors.Is(runErr, observerErr) {
+		t.Fatalf("Run() error = %v, want observer error", runErr)
+	}
+	if got := len(events.eventsOfType(audit.EventRunFailed)); got != 1 {
+		t.Fatalf("failed run audit events = %d, want 1", got)
 	}
 }
 
 func TestRuntimeRunContextCancelled(t *testing.T) {
-	audit := &recordingAudit{}
-	engine := newTestEngine(t)
-	runtime, err := NewRuntime(Config{
-		Model:           "fake-model",
-		AllowedTools:    []string{"bazi_chart"},
-		EngineMCPURL:    engine.URL,
-		LLMRecorder:     audit,
-		ContractVersion: "test-contract",
-		modelOverride: &fakeLLM{responses: []*model.LLMResponse{{
-			Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "答案"}}},
-		}}},
-	})
-	if err != nil {
-		t.Fatalf("NewRuntime() error = %v", err)
-	}
+	events := &recordingAudit{}
+	runtime := newTestRuntime(t, NewTestDeployment(t), events, &fakeLLM{responses: []*model.LLMResponse{{
+		Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "答案"}}},
+	}}})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, runErr := runtime.Run(ctx, RunRequest{
 		RunID: "run_cancel", ThreadID: "thread_1", UserID: "user_1", UserMessage: "看事业",
 	}, nil)
 	var domainErr *domain.Error
-	if !errors.As(runErr, &domainErr) || domainErr.Code != "runtime_cancelled" {
-		t.Fatalf("Run() error = %v, want runtime_cancelled", runErr)
+	if !errors.As(runErr, &domainErr) || domainErr.Code != domain.CodeRuntimeCancelled {
+		t.Fatalf("Run() error = %v, want %s", runErr, domain.CodeRuntimeCancelled)
 	}
 }
 
 func TestRuntimeRunLLMError(t *testing.T) {
-	audit := &recordingAudit{}
-	engine := newTestEngine(t)
+	events := &recordingAudit{}
 	llmErr := errors.New("model overloaded")
-	runtime, err := NewRuntime(Config{
-		Model:           "fake-model",
-		AllowedTools:    []string{"bazi_chart"},
-		EngineMCPURL:    engine.URL,
-		LLMRecorder:     audit,
-		ContractVersion: "test-contract",
-		modelOverride: &fakeLLM{
-			err: llmErr,
-		},
-	})
-	if err != nil {
-		t.Fatalf("NewRuntime() error = %v", err)
-	}
+	runtime := newTestRuntime(t, NewTestDeployment(t), events, &fakeLLM{err: llmErr})
 	_, runErr := runtime.Run(context.Background(), RunRequest{
 		RunID: "run_err", ThreadID: "thread_1", UserID: "user_1", UserMessage: "看事业",
 	}, nil)
@@ -391,28 +382,60 @@ func TestRuntimeRunLLMError(t *testing.T) {
 	if !errors.As(runErr, &domainErr) {
 		t.Fatalf("Run() error = %v, want domain error", runErr)
 	}
-	if domainErr.Code != "runtime_failed" {
-		t.Fatalf("error code = %s, want runtime_failed", domainErr.Code)
+	if domainErr.Code != domain.CodeRuntimeFailed {
+		t.Fatalf("error code = %s, want %s", domainErr.Code, domain.CodeRuntimeFailed)
 	}
-	if audit.last == nil || audit.last.Status != domain.LLMCallFailed {
-		t.Fatalf("audit should record failed LLM call, got %+v", audit.last)
+	if got := len(events.eventsOfType(audit.EventLLMCallFailed)); got != 1 {
+		t.Fatalf("failed LLM audit events = %d, want 1", got)
 	}
 }
 
-func newTestEngine(t *testing.T) *httptest.Server {
-	t.Helper()
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+// NewTestDeployment exposes the generic test deployment to external adapter
+// tests compiled into the same test binary.
+func NewTestDeployment(t testing.TB) *Deployment {
+	deployment, err := testDeployment()
 	if err != nil {
-		t.Skipf("network listen unavailable: %v", err)
+		t.Fatal(err)
 	}
-	engine := &httptest.Server{
-		Listener: listener,
-		Config:   &http.Server{Handler: newStubEngineMCP()},
-	}
-	engine.Start()
-	t.Cleanup(func() {
-		engine.CloseClientConnections()
-		engine.Close()
+	return deployment
+}
+
+func TestRuntimeBuildsStandardADKAgentGraph(t *testing.T) {
+	deployment := NewTestDeployment(t)
+	// Convert the generic single-agent test deployment into a two-Agent tree.
+	deployment.Spec.Agents[0].Name = "coordinator"
+	deployment.Spec.Agents[0].SubAgents = []AgentReference{{Name: "worker"}}
+	deployment.Spec.Agents = append(deployment.Spec.Agents, AgentDefinition{
+		Name:        "worker",
+		Version:     "1.0.0",
+		Description: "generic worker agent",
+		Mode:        AgentModeTask,
+		Instruction: deployment.Spec.Agents[0].Instruction,
+		Output:      deployment.Spec.Agents[0].Output,
+		Tools:       ToolAllowlist{Allow: []string{"test_tool"}},
 	})
-	return engine
+	if err := deployment.validate(); err != nil {
+		t.Fatalf("validate multi-agent deployment: %v", err)
+	}
+	for index := range deployment.Spec.Agents {
+		agent := &deployment.Spec.Agents[index]
+		if err := agent.validate(); err != nil {
+			t.Fatalf("validate agent %q: %v", agent.Name, err)
+		}
+	}
+
+	events := &recordingAudit{}
+	runtime := newTestRuntime(t, deployment, events, &fakeLLM{responses: []*model.LLMResponse{{
+		Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: `{"answer":"ok"}`}}},
+	}}})
+	if runtime.entrypoint.Name != "coordinator" {
+		t.Fatalf("entrypoint = %q", runtime.entrypoint.Name)
+	}
+	worker := runtime.RootAgent().FindSubAgent("worker")
+	if worker == nil {
+		t.Fatal("worker sub-agent was not registered with ADK")
+	}
+	if worker.Name() != "worker" {
+		t.Fatalf("worker name = %q", worker.Name())
+	}
 }

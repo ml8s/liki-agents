@@ -26,28 +26,31 @@ type LLMTokenUsage struct {
 }
 
 type LLMCall struct {
-	ID               string
-	RunID            ID
-	ThreadID         ID
-	UserID           string
-	AgentName        string
-	Model            string
-	Provider         string
-	Status           LLMCallStatus
-	PromptTokens     int64
-	CompletionTokens int64
-	ThoughtTokens    int64
-	TotalTokens      int64
-	DurationMS       int64
-	Product          string
-	ErrorCode        string
-	ErrorMessage     string
-	GraphVersion     string
-	ContractVersion  string
-	PromptVersion    string
-	PolicyVersion    string
-	StartedAt        time.Time
-	FinishedAt       time.Time
+	ID                    string
+	RunID                 ID
+	ThreadID              ID
+	UserID                string
+	AgentName             string
+	AgentVersion          string
+	AgentDefinitionDigest string
+	Model                 string
+	Provider              string
+	Status                LLMCallStatus
+	PromptTokens          int64
+	CompletionTokens      int64
+	ThoughtTokens         int64
+	TotalTokens           int64
+	DurationMS            int64
+	ErrorCode             string
+	ErrorMessage          string
+	GraphVersion          string
+	ContractVersion       string
+	PromptVersion         string
+	DefinitionName        string
+	DefinitionVersion     string
+	DefinitionDigest      string
+	StartedAt             time.Time
+	FinishedAt            time.Time
 }
 
 func (c *LLMCall) Normalize() {

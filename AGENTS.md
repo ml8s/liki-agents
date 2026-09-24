@@ -1,4 +1,4 @@
-# liki-agent Working Rules
+# Liki Agents Working Rules
 
 1. Keep `internal/domain` free of HTTP, MCP, LLM SDK, and storage imports.
 2. Add capabilities through ports, not by importing adapters from domain or app.

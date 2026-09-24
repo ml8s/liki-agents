@@ -1,13 +1,19 @@
 package agent_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
 
-	agent "github.com/liki/liki-agent/internal/agent"
-	"github.com/liki/liki-agent/internal/domain"
+	agent "github.com/ml8s/liki-agents/internal/agent"
+	"github.com/ml8s/liki-agents/internal/audit"
+	"github.com/ml8s/liki-agents/internal/domain"
 )
+
+type nopAuditRecorder struct{}
+
+func (nopAuditRecorder) Record(context.Context, *audit.Event) error { return nil }
 
 func fixedNow() time.Time {
 	return time.Date(2026, 9, 22, 1, 2, 3, 0, time.UTC)
@@ -22,18 +28,22 @@ func TestNewRuntimeValidatesContract(t *testing.T) {
 		{
 			name: "missing model",
 			config: agent.Config{
-				AllowedTools: []string{"bazi_chart"},
-				EngineMCPURL: "http://127.0.0.1:1/mcp",
+				Deployment:    agent.NewTestDeployment(t),
+				AuditRecorder: nopAuditRecorder{},
+				EngineMCPURL:  "http://127.0.0.1:1/mcp",
 			},
 			expected: "llm_model_missing",
 		},
 		{
-			name: "missing tools",
+			name: "invalid structured output capability",
 			config: agent.Config{
-				Model:        "test-model",
-				EngineMCPURL: "http://127.0.0.1:1/mcp",
+				Model:            "test-model",
+				Deployment:       agent.NewTestDeployment(t),
+				AuditRecorder:    nopAuditRecorder{},
+				EngineMCPURL:     "http://127.0.0.1:1/mcp",
+				StructuredOutput: "yaml",
 			},
-			expected: "engine_tools_empty",
+			expected: "structured_output_capability_invalid",
 		},
 	}
 	for _, test := range tests {

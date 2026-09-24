@@ -1,0 +1,39 @@
+services:
+  liki-agents:
+    image: liki-agents:latest
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${LIKI_AGENTS_VERSION:-dev}
+        COMMIT: ${LIKI_AGENTS_COMMIT:-unknown}
+        BUILD_TIME: ${LIKI_AGENTS_BUILD_TIME:-unknown}
+    environment:
+      LIKI_ENV: development
+      LIKI_AGENTS_INTERNAL_TOKEN: ${LIKI_AGENTS_INTERNAL_TOKEN:-dev-agent-token}
+      LIKI_AGENTS_PUBLIC_URL: ${LIKI_AGENTS_PUBLIC_URL:-http://127.0.0.1:8083}
+      LIKI_DB_PATH: /tmp/liki-agents-audit.db
+      LIKI_ENGINE_MCP_URL: ${LIKI_ENGINE_MCP_URL:?LIKI_ENGINE_MCP_URL must point to an externally managed Engine MCP endpoint}
+      LIKI_ENGINE_MCP_TOKEN: ${LIKI_ENGINE_MCP_TOKEN:-}
+      LIKI_ENGINE_CONTRACT_VERSION: ${LIKI_ENGINE_CONTRACT_VERSION:?LIKI_ENGINE_CONTRACT_VERSION is required}
+      LIKI_AGENTS_DEPLOYMENT_FILE: /agent-deployment/deployment.json
+      LIKI_LLM_BASE_URL: ${LIKI_LLM_BASE_URL:-https://api.openai.com/v1}
+      LIKI_LLM_API_KEY: ${LIKI_LLM_API_KEY}
+      LIKI_LLM_MODEL: ${LIKI_LLM_MODEL:?LIKI_LLM_MODEL is required}
+      LIKI_LLM_TEMPERATURE: ${LIKI_LLM_TEMPERATURE:-0.2}
+      LIKI_LLM_PROVIDER: ${LIKI_LLM_PROVIDER:?LIKI_LLM_PROVIDER is required}
+      LIKI_LLM_STRUCTURED_OUTPUT: ${LIKI_LLM_STRUCTURED_OUTPUT:-}
+    ports:
+      - "8083:8083"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./dev/agent-deployment:/agent-deployment:ro
+    restart: "no"
+    init: true
+    stop_grace_period: 35s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1"
