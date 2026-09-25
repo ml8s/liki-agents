@@ -121,6 +121,36 @@ func TestOperationalEndpoints(t *testing.T) {
 	}
 }
 
+func TestDrainMakesReadinessUnavailableWithoutCancellingRequests(t *testing.T) {
+	server, err := transport.New(transport.Services{
+		AgentCard:    http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
+		A2A:          http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }),
+		AGUI:         http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }),
+		HealthChecks: []platform.HealthChecker{healthy{}},
+	})
+	if err != nil {
+		t.Fatalf("transport.New() error = %v", err)
+	}
+	server.Drain()
+
+	readiness := httptest.NewRecorder()
+	server.ServeHTTP(readiness, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if readiness.Code != http.StatusServiceUnavailable {
+		t.Fatalf("drained readiness status = %d, want %d", readiness.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(readiness.Body.String(), `"draining"`) {
+		t.Fatalf("drained readiness body = %s", readiness.Body.String())
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/a2a", strings.NewReader(`{}`))
+	request.Header.Set("X-Liki-User-ID", "user_1")
+	protocol := httptest.NewRecorder()
+	server.ServeHTTP(protocol, request)
+	if protocol.Code != http.StatusAccepted {
+		t.Fatalf("in-flight protocol status after Drain() = %d", protocol.Code)
+	}
+}
+
 func TestHealthzIsRetired(t *testing.T) {
 	handler := newServer(t, "")
 	response := httptest.NewRecorder()

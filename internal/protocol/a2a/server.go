@@ -14,6 +14,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"github.com/ml8s/liki-agents/internal/agent"
 	"github.com/ml8s/liki-agents/internal/platform/identity"
 	"google.golang.org/adk/v2/server/adka2a/v2"
@@ -38,6 +39,11 @@ func init() {
 type Config struct {
 	PublicURL  *url.URL
 	RunTimeout time.Duration
+
+	// TaskStore is the official A2A taskstore.Store injection point. A shared
+	// database implementation can be supplied without changing A2A wire
+	// semantics. Nil selects the SDK's official in-memory implementation.
+	TaskStore taskstore.Store
 }
 
 // Server is the official ADK/A2A executor and Agent Card provider.
@@ -137,6 +143,9 @@ func New(runtime *agent.Runtime, config Config) (*Server, error) {
 		},
 	})
 	handlerOptions := []a2asrv.RequestHandlerOption{a2asrv.WithCapabilityChecks(&capabilities)}
+	if config.TaskStore != nil {
+		handlerOptions = append(handlerOptions, a2asrv.WithTaskStore(config.TaskStore))
+	}
 	handlerOptions = append(handlerOptions, a2asrv.WithAgentInactivityTimeout(config.RunTimeout))
 	requestHandler := a2asrv.NewHandler(
 		executor,

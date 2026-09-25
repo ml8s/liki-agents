@@ -177,6 +177,9 @@ func NewRuntime(config Config) (*Runtime, error) {
 	// session is deliberately run-scoped working state and must not become a
 	// second durable conversation store.
 	sessionService := session.InMemoryService()
+	if config.SessionService != nil {
+		sessionService = config.SessionService
+	}
 
 	var aiModel model.LLM
 	if config.modelOverride != nil {

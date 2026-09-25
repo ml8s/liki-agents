@@ -31,6 +31,9 @@ func TestLoadValidConfiguration(t *testing.T) {
 	if cfg.DeploymentFile != "/tmp/agent-deployment.json" {
 		t.Fatalf("definition file = %q", cfg.DeploymentFile)
 	}
+	if cfg.Topology != config.TopologySingle {
+		t.Fatalf("topology = %q, want single", cfg.Topology)
+	}
 	t.Setenv("LIKI_MAX_CONCURRENT_RUNS", "7")
 	cfg, err = config.Load()
 	if err != nil {
@@ -58,6 +61,8 @@ func TestLoadRejectsInvalidSettings(t *testing.T) {
 	}{
 		{name: "missing deployment", key: "LIKI_AGENTS_DEPLOYMENT_FILE", value: "", wantErr: "LIKI_AGENTS_DEPLOYMENT_FILE is required"},
 		{name: "invalid deployment digest", key: "LIKI_AGENTS_DEPLOYMENT_DIGEST", value: "sha256:abc", wantErr: "LIKI_AGENTS_DEPLOYMENT_DIGEST"},
+		{name: "multi topology is fail-closed", key: "LIKI_AGENTS_TOPOLOGY", value: "multi", wantErr: "LIKI_AGENTS_TOPOLOGY=multi is not supported yet"},
+		{name: "invalid topology", key: "LIKI_AGENTS_TOPOLOGY", value: "cluster", wantErr: "LIKI_AGENTS_TOPOLOGY is unsupported"},
 		{name: "unsupported provider", key: "LIKI_LLM_PROVIDER", value: "unknown", wantErr: "LIKI_LLM_PROVIDER is unsupported"},
 		{name: "unsupported structured output", key: "LIKI_LLM_STRUCTURED_OUTPUT", value: "yaml", wantErr: "LIKI_LLM_STRUCTURED_OUTPUT is unsupported"},
 		{name: "invalid public url", key: "LIKI_AGENTS_PUBLIC_URL", value: "agent.internal", wantErr: "LIKI_AGENTS_PUBLIC_URL must be an absolute HTTP(S) URL"},

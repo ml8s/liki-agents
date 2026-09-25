@@ -13,6 +13,7 @@ import (
 
 	a2atypes "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"github.com/ml8s/liki-agents/internal/agent"
 	"github.com/ml8s/liki-agents/internal/audit"
 	"github.com/ml8s/liki-agents/internal/protocol/a2a"
@@ -265,6 +266,53 @@ func TestA2AJSONRPCExecutesRuntimeAndClosesAudit(t *testing.T) {
 	}
 	if completed[0].ID == started[0].ID {
 		t.Fatal("A2A terminal audit ID collided with started ID")
+	}
+}
+
+func TestA2AUsesInjectedOfficialTaskStore(t *testing.T) {
+	publicURL, err := url.Parse("https://agent.internal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, _ := testRuntime(t)
+	store := taskstore.NewInMemory(nil)
+	server, err := a2a.New(runtime, a2a.Config{
+		PublicURL: publicURL,
+		TaskStore: store,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	endpoint := httptest.NewServer(server.EndpointHandler())
+	t.Cleanup(endpoint.Close)
+
+	cardResponse := httptest.NewRecorder()
+	server.AgentCardHandler().ServeHTTP(cardResponse, httptest.NewRequest(http.MethodGet, "/card", nil))
+	var card a2atypes.AgentCard
+	if err := json.Unmarshal(cardResponse.Body.Bytes(), &card); err != nil {
+		t.Fatalf("decode Agent Card: %v", err)
+	}
+	card.SupportedInterfaces[0].URL = endpoint.URL
+	client, err := a2aclient.NewFromCard(context.Background(), &card, a2aclient.WithJSONRPCTransport(nil))
+	if err != nil {
+		t.Fatalf("NewFromCard() error = %v", err)
+	}
+	result, err := client.SendMessage(context.Background(), &a2atypes.SendMessageRequest{
+		Message: a2atypes.NewMessage(a2atypes.MessageRoleUser, a2atypes.NewTextPart("hello")),
+	})
+	if err != nil {
+		t.Fatalf("SendMessage() error = %v", err)
+	}
+	task, ok := result.(*a2atypes.Task)
+	if !ok {
+		t.Fatalf("SendMessage result = %#v, want task", result)
+	}
+	stored, err := store.Get(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("injected TaskStore Get(%s) error = %v", task.ID, err)
+	}
+	if stored.Task == nil || stored.Task.ID != task.ID {
+		t.Fatalf("stored task = %#v, want task %s", stored.Task, task.ID)
 	}
 }
 

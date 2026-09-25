@@ -173,6 +173,8 @@ POST endpoints enforce a 2 MB body limit.
 Readiness checks SQLite and every declared MCP dependency through the official
 MCP discovery RPC. It requires the configured MCP revision, server identity,
 tool capability, and every allowlisted tool.
+During process drain, readiness reports `draining` before the standard HTTP
+server shutdown deadline waits for active protocol requests.
 
 Prometheus exposes protocol request count and duration, active streams, LLM
 calls and tokens, tool calls and duration, and dependency readiness. Structured

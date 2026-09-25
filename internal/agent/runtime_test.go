@@ -10,6 +10,7 @@ import (
 	agent "github.com/ml8s/liki-agents/internal/agent"
 	"github.com/ml8s/liki-agents/internal/audit"
 	"github.com/ml8s/liki-agents/internal/domain"
+	"google.golang.org/adk/v2/session"
 )
 
 type nopAuditRecorder struct{}
@@ -115,6 +116,26 @@ func TestRuntimeExposesImmutableDeploymentViews(t *testing.T) {
 		unchangedEntrypoint.Tools.Allow["test"][0] != "test_tool" ||
 		unchangedDeployment.Metadata.Name == "mutated-deployment" {
 		t.Fatalf("runtime view reflected protocol mutation: %+v", unchangedEntrypoint)
+	}
+}
+
+func TestNewRuntimeUsesInjectedOfficialSessionService(t *testing.T) {
+	deployment := agent.NewTestDeployment(t)
+	t.Setenv("TEST_MCP_ENDPOINT", "http://127.0.0.1:9/mcp")
+	injected := session.InMemoryService()
+	runtime, err := agent.NewRuntime(agent.Config{
+		Model:            "test-model",
+		ModelAPIKey:      "test-key",
+		Deployment:       deployment,
+		StructuredOutput: agent.StructuredOutputJSONSchema,
+		AuditRecorder:    nopAuditRecorder{},
+		SessionService:   injected,
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime() error = %v", err)
+	}
+	if runtime.RunnerConfig().SessionService != injected {
+		t.Fatalf("runner session service = %#v, want injected official service", runtime.RunnerConfig().SessionService)
 	}
 }
 

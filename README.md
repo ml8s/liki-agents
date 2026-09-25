@@ -101,7 +101,7 @@ records do not contain prompts, raw model output, or tool payloads.
 
 | Prefix / variable | Purpose |
 |---|---|
-| `LIKI_AGENTS_*` | service address, token, data path, artifact and optional digest pin |
+| `LIKI_AGENTS_*` | service address, token, data path, topology, artifact and digest pin |
 | `LIKI_DB_PATH` | SQLite audit database |
 | `LIKI_MCP_*`, `LIKI_*_MCP_TOKEN` | endpoint/token bindings for logical MCP servers |
 | `LIKI_TOOL_CONTRACT_VERSION`, `LIKI_MAX_CONCURRENT_RUNS` | provenance and bounded concurrent executions |

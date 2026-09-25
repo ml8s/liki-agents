@@ -15,6 +15,7 @@ import (
 
 type Config struct {
 	Env                 string
+	Topology            Topology
 	Addr                string
 	PublicURL           string
 	InternalToken       string
@@ -38,9 +39,26 @@ type Config struct {
 	LogLevel            string
 }
 
+// Topology declares the process-state contract required by the deployment.
+type Topology string
+
+const (
+	// TopologySingle is the only supported production topology. It permits
+	// official in-memory ADK sessions, the SDK's in-memory A2A task store, and
+	// the local SQLite evidence database.
+	TopologySingle Topology = "single"
+
+	// TopologyMulti is intentionally recognized but rejected. It is a fail-closed
+	// deployment guard, not an enabled feature: shared ADK sessions, an A2A
+	// task store, transactional audit ownership, and routing must be supplied
+	// through official extension points before it can start.
+	TopologyMulti Topology = "multi"
+)
+
 func Load() (Config, error) {
 	cfg := Config{
 		Env:                 getEnv("LIKI_ENV", "development"),
+		Topology:            Topology(strings.ToLower(strings.TrimSpace(getEnv("LIKI_AGENTS_TOPOLOGY", string(TopologySingle))))),
 		Addr:                getEnv("LIKI_AGENTS_ADDR", ":8083"),
 		PublicURL:           getEnv("LIKI_AGENTS_PUBLIC_URL", "http://127.0.0.1:8083"),
 		InternalToken:       getEnv("LIKI_AGENTS_INTERNAL_TOKEN", ""),
@@ -101,6 +119,17 @@ func validate(cfg Config) (Config, error) {
 	}
 	if cfg.DeploymentDigest != "" && !domain.IsValidSHA256Digest(cfg.DeploymentDigest) {
 		return Config{}, fmt.Errorf("LIKI_AGENTS_DEPLOYMENT_DIGEST must be sha256:<64-hex>")
+	}
+	switch cfg.Topology {
+	case TopologySingle:
+	case TopologyMulti:
+		return Config{}, fmt.Errorf(
+			"LIKI_AGENTS_TOPOLOGY=multi is not supported yet; it requires shared ADK session storage, a database-backed A2A task store, transactional audit/run ownership, deployment digest pinning, and explicit task routing",
+		)
+	case "":
+		cfg.Topology = TopologySingle
+	default:
+		return Config{}, fmt.Errorf("LIKI_AGENTS_TOPOLOGY is unsupported: %q", cfg.Topology)
 	}
 	switch cfg.LLMProvider {
 	case "openai", "zhipu", "bigmodel", "glm":

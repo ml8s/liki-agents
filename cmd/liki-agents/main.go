@@ -159,6 +159,8 @@ func run() error {
 
 	select {
 	case <-ctx.Done():
+		logger.Info("liki-agents draining", "shutdown_timeout", cfg.ShutdownTimeout)
+		protocolServer.Drain()
 		drainCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 		defer cancel()
 		return httpServer.Shutdown(drainCtx)

@@ -57,6 +57,17 @@ reviewed candidate replaces this service's local loader contract.
 
 ## Deployment model
 
+### Phased optimization plan
+
+| Phase | Scope | Acceptance gate |
+|---|---|---|
+| 1. Safe single-process contract | Explicit topology guard, official ADK session and A2A task-store injection points, readiness drain | Default behavior is unchanged; `multi` fails closed; official-interface injection is tested; no experimental cluster mode |
+| 2. Shared state design | Select PostgreSQL/Spanner (or official Vertex AI) ADK sessions, database A2A tasks, and transactional audit/run ownership | Official conformance tests plus cross-replica uniqueness, cancellation, drain, and failure tests pass |
+| 3. Routing design | Choose A2A distributed execution, task ownership routing, or explicit AG-UI stream affinity | `GetTask`/`CancelTask` work on any A2A replica and AG-UI stream behavior is deterministic during rollout |
+| 4. Rollout authorization | Mandatory digest pin, schema compatibility policy, orchestration manifests, chaos tests | New/old replicas cannot execute mismatched behavior unexpectedly; kill/drain tests preserve audit invariants |
+
+Only phase 1 is implemented. Later phases require measured capacity or availability requirements and a reviewed design.
+
 ### Current supported topology
 
 The service is deliberately **single-process/single-replica**:
@@ -67,9 +78,27 @@ The service is deliberately **single-process/single-replica**:
 - audit evidence is in a local SQLite file;
 - MCP toolsets and the ADK graph are process-local.
 
+`LIKI_AGENTS_TOPOLOGY` makes that contract explicit. Its default and only
+supported value is `single`; `multi` is recognized but fails closed so an
+orchestrator cannot accidentally scale an unsafe process.
+
 A container orchestrator may restart one replica for availability, but scaling
 `replicas > 1` is not supported and must not be configured. SQLite must not be
 shared by multiple nodes.
+
+### Harmless readiness already implemented
+
+The runtime keeps official extension points without enabling an experimental
+or multi-replica mode:
+
+- `agent.Config.SessionService` accepts any official ADK `session.Service`;
+  nil still selects ADK's official in-memory implementation.
+- A2A adapter configuration accepts the SDK's official
+  `a2asrv/taskstore.Store`; nil still selects the SDK default.
+- On `SIGINT`/`SIGTERM`, the HTTP server marks `/readyz` as `draining`, then
+  uses the standard `http.Server.Shutdown` deadline to wait for in-flight
+  requests. Drain does not cancel active protocol streams.
+- The A2A SDK's experimental cluster mode is not enabled.
 
 ### When more than one replica is justified
 

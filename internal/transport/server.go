@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -34,8 +35,9 @@ type Services struct {
 }
 
 type Server struct {
-	services Services
-	routes   *http.ServeMux
+	services  Services
+	routes    *http.ServeMux
+	readiness atomic.Bool
 }
 
 func New(services Services) (*Server, error) {
@@ -47,6 +49,7 @@ func New(services Services) (*Server, error) {
 	}
 
 	server := &Server{services: services}
+	server.readiness.Store(true)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /readyz", server.ready)
 	mux.HandleFunc("GET /version", server.version)
@@ -72,6 +75,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	s.routes.ServeHTTP(writer, r)
 	s.observe(r.URL.Path, r.Method, writer.status, time.Since(start))
+}
+
+// Drain removes this process from the readiness rotation. It does not cancel
+// active requests; the HTTP server shutdown deadline still owns draining them.
+func (s *Server) Drain() {
+	s.readiness.Store(false)
 }
 
 func (s *Server) bodyLimit(next http.Handler) http.Handler {
@@ -125,6 +134,13 @@ func (s *Server) authorized(next http.Handler, requireIdentity bool) http.Handle
 }
 
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	if !s.readiness.Load() {
+		if s.services.Dependencies != nil {
+			s.services.Dependencies.SetDependencyReady("runtime", false)
+		}
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "draining"})
+		return
+	}
 	// A disconnected readiness client is not a dependency failure. Health
 	// checks own their deadlines and must run with request values but without
 	// the request's cancellation signal.

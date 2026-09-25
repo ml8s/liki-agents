@@ -43,6 +43,7 @@ services:
         BUILD_TIME: ${LIKI_AGENTS_BUILD_TIME:-unknown}
     environment:
       LIKI_ENV: development
+      LIKI_AGENTS_TOPOLOGY: ${LIKI_AGENTS_TOPOLOGY:-single}
       LIKI_AGENTS_INTERNAL_TOKEN: ${LIKI_AGENTS_INTERNAL_TOKEN:-dev-agent-token}
       LIKI_AGENTS_PUBLIC_URL: ${LIKI_AGENTS_PUBLIC_URL:-http://127.0.0.1:8083}
       LIKI_DB_PATH: /data/liki-agents-audit.db
