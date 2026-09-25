@@ -7,7 +7,7 @@ calls and MCP tools, and exposes standard machine and browser protocols.
 ```text
 machine client ──A2A JSON-RPC──┐
                                ↓
-liki-web ──AG-UI SSE→ liki-agents ──MCP→ Engine / tools
+liki-web ──AG-UI SSE→ liki-agents ──MCP→ external tools
 ```
 
 The runtime is domain-neutral. Deployments provide instructions, output
@@ -23,23 +23,18 @@ is written to `bin/liki-agents`.
 
 ## Quick start
 
-Copy `.env.example` to `.env`, then set the model API key and Engine MCP
-endpoint. Local development may leave the internal token empty to disable
-bearer authentication. Run the runtime in the foreground:
-
-```text
-LIKI_LLM_API_KEY=<model provider API key>
-LIKI_ENGINE_MCP_URL=<Engine MCP endpoint>
-```
-
-Run the runtime in the foreground:
+Copy `.env.example` to `.env`; set `LIKI_LLM_API_KEY` and every endpoint
+variable named by `mcpServers`. Local development may leave the internal token
+empty to disable bearer authentication. Then run:
 
 ```bash
 make run
 curl -sS http://127.0.0.1:8083/readyz | jq
 ```
 
-`make run` does not start Engine MCP. For browser-style local testing, run
+`make run` starts only the runtime; MCP servers are external dependencies.
+`make dev` builds and starts the development Agent plus the Engine and Counsel
+MCP fixtures in Compose. For browser-style local testing, run
 `scripts/dev-chat-ui.sh` and open <http://127.0.0.1:8084>. That UI is
 development-only.
 
@@ -47,13 +42,15 @@ development-only.
 
 An `AgentDeployment` is the sole source of Agent behavior and topology. Each
 Agent has a description, ADK mode, external instruction file, optional output
-contract, and explicit `tools.allow`. The unique Agent with no incoming
-`sub_agents` edge is the entrypoint. ADK owns delegation and execution.
+contract, and explicit `tools.allow`. `mcpServers` declares logical MCP
+dependencies and the environment variables that bind their endpoint and optional
+token at runtime. The unique Agent with no incoming `sub_agents` edge is the
+entrypoint. ADK owns delegation and execution.
 
 Prompts are external instruction files. Plain text is the default output. For
 typed machine-to-machine output, an Agent may declare both a JSON Schema and a
 JSON Pointer to the user-facing string. Tool access is denied unless the tool is
-listed in that Agent's `tools.allow`.
+listed in that Agent's server-scoped `tools.allow` map.
 
 The artifact is validated against
 [`contracts/agent-definition.schema.json`](contracts/agent-definition.schema.json).
@@ -69,7 +66,7 @@ ADK graph semantics.
 | Machine discovery | A2A Agent Card | `GET /.well-known/agent-card.json` | standard capability metadata |
 | Tool server | MCP Streamable HTTP | outbound | deterministic tools |
 
-Operational endpoints are `/healthz`, `/readyz`, `/version`, and `/metrics`.
+Operational endpoints are `/readyz`, `/version`, and `/metrics`.
 There is no private application API and no ADK Launcher control plane.
 
 ## Security boundary
@@ -94,8 +91,8 @@ browser identities.
 Local development may leave `LIKI_AGENTS_INTERNAL_TOKEN` empty. Bearer
 authentication is then disabled, but AG-UI still requires `X-Liki-User-ID`.
 
-Engine access is allowlisted per Agent. Logs, traces, and audit records do not
-contain prompts, raw model output, or tool payloads.
+MCP access is allowlisted per Agent and per server. Logs, traces, and audit
+records do not contain prompts, raw model output, or tool payloads.
 
 ## Configuration
 
@@ -105,19 +102,25 @@ contain prompts, raw model output, or tool payloads.
 |---|---|
 | `LIKI_AGENTS_*` | service address, token, data path, deployment artifact |
 | `LIKI_DB_PATH` | SQLite audit database |
-| `LIKI_ENGINE_*` | external MCP endpoint, token, timeout, contract version |
+| `LIKI_MCP_*`, `LIKI_*_MCP_TOKEN` | endpoint/token bindings for logical MCP servers |
+| `LIKI_TOOL_CONTRACT_VERSION`, `LIKI_MAX_CONCURRENT_RUNS` | provenance and bounded concurrent executions |
 | `LIKI_LLM_*` | OpenAI-compatible model provider |
 | `LIKI_LOG_*` | structured logging |
 | `OTEL_*` | standard OpenTelemetry tracing settings |
 
-Use an empty `LIKI_LLM_STRUCTURED_OUTPUT` for plain-text deployments. Use
-`json_schema` for providers with native strict JSON Schema support and
-`json_object` for provider-safe JSON mode.
+MCP endpoint values are complete URLs for the selected network. The gateway may
+own service prefixes (`/engine/mcp`, `/counsel/mcp/bazi`) while direct
+service-network URLs use the MCP service paths (`/mcp`, `/mcp/bazi`). The
+runtime does not rewrite MCP paths or add private protocol headers.
+
+Use an empty `LIKI_LLM_STRUCTURED_OUTPUT` for plain-text deployments;
+`json_schema` and `json_object` are provider-specific strict/JSON modes.
 
 ## Operations
 
 Use `make run` for the host process and `make dev` for the containerized
-development service. Both run in the foreground and stop with `Ctrl-C`.
+development service. Both run in the foreground and stop with `Ctrl-C`. `make dev`
+also starts the development Engine and Counsel MCP fixtures.
 `make dev-down` removes the Compose workload; `make db-backup` creates an
 online SQLite backup.
 
@@ -162,10 +165,7 @@ make build
 
 `make gate` is the pre-push gate. It runs documentation linting, Go static
 checks, isolated race tests, and deployment validation. It does not call a real
-model provider or require Engine MCP.
-
-Documentation checks use `markdownlint-cli2` and a `remark-parse` AST contract.
-The Node dependencies are development-only.
+model provider or external MCP.
 
 ## Project boundary
 
@@ -175,5 +175,5 @@ approval workflows, or a management console.
 
 `liki-web` owns users, products, entitlements, quotas, and durable product
 conversations. A Liki domain release owns prompts, skills, workflow policy, and
-tool semantics. Engine owns deterministic tool implementations exposed through
-MCP.
+tool semantics. External MCP services such as Engine and Counsel own
+deterministic tool implementations.

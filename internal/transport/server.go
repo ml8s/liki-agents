@@ -2,6 +2,7 @@
 package transport
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -9,7 +10,9 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"unicode"
 
 	"github.com/ml8s/liki-agents/internal/domain"
 	"github.com/ml8s/liki-agents/internal/observability"
@@ -45,13 +48,12 @@ func New(services Services) (*Server, error) {
 
 	server := &Server{services: services}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", server.health)
 	mux.HandleFunc("GET /readyz", server.ready)
 	mux.HandleFunc("GET /version", server.version)
 	mux.Handle("GET /metrics", server.metricsHandler())
 	mux.Handle("GET /.well-known/agent-card.json", server.services.AgentCard)
-	mux.Handle("POST /a2a", server.bodyLimit(server.authorized(server.services.A2A, false)))
-	mux.Handle("POST /ag-ui", server.bodyLimit(server.authorized(server.services.AGUI, true)))
+	mux.Handle("POST /a2a", server.authorized(server.bodyLimit(server.services.A2A), false))
+	mux.Handle("POST /ag-ui", server.authorized(server.bodyLimit(server.services.AGUI), true))
 
 	server.routes = mux
 	return server, nil
@@ -60,7 +62,7 @@ func New(services Services) (*Server, error) {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	requestID := r.Header.Get("X-Request-ID")
-	if requestID == "" {
+	if !validRequestID(requestID) {
 		requestID = randomID()
 	}
 	r = r.WithContext(identity.WithIdentity(r.Context(), verifiedIdentity(r)))
@@ -122,25 +124,39 @@ func (s *Server) authorized(next http.Handler, requireIdentity bool) http.Handle
 	})
 }
 
-func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
-	for _, checker := range s.services.HealthChecks {
-		health := checker.CheckHealth(r.Context())
+	// A disconnected readiness client is not a dependency failure. Health
+	// checks own their deadlines and must run with request values but without
+	// the request's cancellation signal.
+	checkContext := context.WithoutCancel(r.Context())
+	healthResults := make([]platform.DependencyHealth, len(s.services.HealthChecks))
+	var wait sync.WaitGroup
+	for index, checker := range s.services.HealthChecks {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			healthResults[index] = checker.CheckHealth(checkContext)
+		}()
+	}
+	wait.Wait()
+
+	unhealthy := make([]string, 0)
+	for _, health := range healthResults {
 		if s.services.Dependencies != nil {
 			s.services.Dependencies.SetDependencyReady(health.Name, health.OK)
 		}
 		if !health.OK {
 			s.services.Logger.Warn("readiness dependency unhealthy",
 				"dependency", health.Name, "detail", health.Detail)
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-				"status":     "unavailable",
-				"dependency": health.Name,
-			})
-			return
+			unhealthy = append(unhealthy, health.Name)
 		}
+	}
+	if len(unhealthy) != 0 {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status":       "unavailable",
+			"dependencies": unhealthy,
+		})
+		return
 	}
 	if s.services.Dependencies != nil {
 		s.services.Dependencies.SetDependencyReady("runtime", true)
@@ -155,7 +171,7 @@ func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
 		"commit":        buildinfo.Commit,
 		"build_time":    buildinfo.BuildTime,
 		"graph_version": buildinfo.GraphVersion,
-		"protocols":     []string{"a2a", "ag-ui", "mcp"},
+		"protocols":     []string{"a2a", "ag-ui", "mcp-client"},
 	})
 }
 
@@ -170,10 +186,22 @@ func (s *Server) metricsHandler() http.Handler {
 
 func verifiedIdentity(r *http.Request) identity.Identity {
 	userID := strings.TrimSpace(r.Header.Get("X-Liki-User-ID"))
-	if userID == "" {
+	if !validRequestID(userID) {
 		return identity.Identity{}
 	}
 	return identity.Identity{UserID: userID}
+}
+
+func validRequestID(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, char := range value {
+		if !unicode.IsPrint(char) {
+			return false
+		}
+	}
+	return true
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

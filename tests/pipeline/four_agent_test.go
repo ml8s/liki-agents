@@ -17,6 +17,7 @@ func TestFourAgentArtifactIsLoadable(t *testing.T) {
 		"kind": "AgentDeployment",
 		"metadata": {"name": "generic-four-agents", "version": "1.0.0"},
 		"spec": {
+			"mcpServers": [{"name": "test", "endpointEnv": "TEST_MCP_ENDPOINT"}],
 			"agents": [
 				{
 					"name": "main", "version": "1.0.0",
@@ -24,7 +25,7 @@ func TestFourAgentArtifactIsLoadable(t *testing.T) {
 					"mode": "chat",
 					"sub_agents": [{"name": "planner"}],
 					"instruction": {"path": "instruction.md"},
-					"tools": {"allow": []}
+					"tools": {"allow": {}}
 				},
 				{
 					"name": "planner", "version": "1.0.0",
@@ -32,7 +33,7 @@ func TestFourAgentArtifactIsLoadable(t *testing.T) {
 					"mode": "chat",
 					"sub_agents": [{"name": "worker"}],
 					"instruction": {"path": "instruction.md"},
-					"tools": {"allow": []}
+					"tools": {"allow": {}}
 				},
 				{
 					"name": "worker", "version": "1.0.0",
@@ -40,7 +41,7 @@ func TestFourAgentArtifactIsLoadable(t *testing.T) {
 					"mode": "task",
 					"sub_agents": [{"name": "reviewer"}],
 					"instruction": {"path": "instruction.md"},
-					"tools": {"allow": ["engine_tool"]}
+					"tools": {"allow": {"test": ["engine_tool"]}}
 				},
 				{
 					"name": "reviewer", "version": "1.0.0",
@@ -48,7 +49,7 @@ func TestFourAgentArtifactIsLoadable(t *testing.T) {
 					"mode": "single_turn",
 					"sub_agents": [],
 					"instruction": {"path": "instruction.md"},
-					"tools": {"allow": []}
+					"tools": {"allow": {}}
 				}
 			]
 		}

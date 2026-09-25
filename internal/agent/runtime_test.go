@@ -30,7 +30,6 @@ func TestNewRuntimeValidatesContract(t *testing.T) {
 			config: agent.Config{
 				Deployment:    agent.NewTestDeployment(t),
 				AuditRecorder: nopAuditRecorder{},
-				EngineMCPURL:  "http://127.0.0.1:1/mcp",
 			},
 			expected: "llm_model_missing",
 		},
@@ -40,7 +39,6 @@ func TestNewRuntimeValidatesContract(t *testing.T) {
 				Model:            "test-model",
 				Deployment:       agent.NewTestDeployment(t),
 				AuditRecorder:    nopAuditRecorder{},
-				EngineMCPURL:     "http://127.0.0.1:1/mcp",
 				StructuredOutput: "yaml",
 			},
 			expected: "structured_output_capability_invalid",
@@ -52,6 +50,66 @@ func TestNewRuntimeValidatesContract(t *testing.T) {
 			var domainErr *domain.Error
 			if !errors.As(err, &domainErr) || domainErr.Code != test.expected {
 				t.Fatalf("NewRuntime() error = %v, want %s", err, test.expected)
+			}
+		})
+	}
+}
+
+func TestRuntimeExposesImmutableDeploymentViews(t *testing.T) {
+	runtime, _ := newAuditRuntime(t)
+	entrypoint := runtime.Entrypoint()
+	entrypoint.Name = "mutated"
+	entrypoint.Tools.Allow["test"] = []string{"unauthorized"}
+	mutatedDeployment := runtime.Deployment()
+	mutatedDeployment.Metadata.Name = "mutated-deployment"
+
+	unchangedEntrypoint := runtime.Entrypoint()
+	unchangedDeployment := runtime.Deployment()
+	if unchangedEntrypoint.Name == "mutated" ||
+		len(unchangedEntrypoint.Tools.Allow["test"]) != 1 ||
+		unchangedEntrypoint.Tools.Allow["test"][0] != "test_tool" ||
+		unchangedDeployment.Metadata.Name == "mutated-deployment" {
+		t.Fatalf("runtime view reflected protocol mutation: %+v", unchangedEntrypoint)
+	}
+}
+
+func TestNewRuntimeRequiresMCPEndpointEnvironment(t *testing.T) {
+	deployment := agent.NewTestDeployment(t)
+	t.Setenv("TEST_MCP_ENDPOINT", "")
+	_, err := agent.NewRuntime(agent.Config{
+		Model:            "test-model",
+		Deployment:       deployment,
+		StructuredOutput: agent.StructuredOutputJSONSchema,
+		AuditRecorder:    nopAuditRecorder{},
+	})
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeMCPEndpointEnvMissing {
+		t.Fatalf("NewRuntime() error = %v, want mcp_endpoint_env_missing", err)
+	}
+}
+
+func TestNewRuntimeRejectsInvalidMCPEndpoint(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint string
+	}{
+		{name: "not a URL", endpoint: "engine-mcp:8085"},
+		{name: "unsupported scheme", endpoint: "in-memory://test"},
+		{name: "missing host", endpoint: "http:///mcp"},
+		{name: "embedded credentials", endpoint: "http://user:password@engine-mcp:8085/mcp"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("TEST_MCP_ENDPOINT", test.endpoint)
+			_, err := agent.NewRuntime(agent.Config{
+				Model:            "test-model",
+				Deployment:       agent.NewTestDeployment(t),
+				StructuredOutput: agent.StructuredOutputJSONSchema,
+				AuditRecorder:    nopAuditRecorder{},
+			})
+			var domainErr *domain.Error
+			if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeMCPEndpointInvalid {
+				t.Fatalf("NewRuntime() error = %v, want %s", err, domain.CodeMCPEndpointInvalid)
 			}
 		})
 	}

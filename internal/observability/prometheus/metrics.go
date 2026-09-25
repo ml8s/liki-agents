@@ -56,11 +56,11 @@ func New() *Metrics {
 		}, []string{"model", "status"}),
 		toolCalls: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "liki_agents_tool_calls_total",
-			Help: "Engine tool calls by agent, tool, and status.",
+			Help: "MCP tool calls by agent, tool, and status.",
 		}, []string{"agent", "tool", "status"}),
 		toolLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "liki_agents_tool_duration_seconds",
-			Help:    "Engine tool duration by agent and tool.",
+			Help:    "MCP tool duration by agent and tool.",
 			Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
 		}, []string{"agent", "tool"}),
 		delegations: prometheus.NewCounterVec(prometheus.CounterOpts{

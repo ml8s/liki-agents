@@ -7,8 +7,11 @@ const (
 	// Domain validation codes (internal/domain)
 	CodeLLMCallIDRequired        = "llm_call_id_required"
 	CodeRunIDRequired            = "run_id_required"
+	CodeRunIDInvalid             = "run_id_invalid"
 	CodeThreadIDRequired         = "thread_id_required"
+	CodeThreadIDInvalid          = "thread_id_invalid"
 	CodeUserIDRequired           = "user_id_required"
+	CodeUserIDInvalid            = "user_id_invalid"
 	CodeAgentNameRequired        = "agent_name_required"
 	CodeModelRequired            = "model_required"
 	CodeLLMCallStartedAtRequired = "llm_call_started_at_required"
@@ -16,10 +19,11 @@ const (
 
 	// Runtime initialization codes (internal/agent constructor)
 	CodeLLMModelMissing        = "llm_model_missing"
-	CodeEngineMCPURLMissing    = "engine_mcp_url_missing"
+	CodeMCPEndpointEnvMissing  = "mcp_endpoint_env_missing"
+	CodeMCPEndpointInvalid     = "mcp_endpoint_invalid"
 	CodeLLMUnavailable         = "llm_unavailable"
 	CodeRuntimeInitFailed      = "runtime_init_failed"
-	CodeEngineToolsUnavailable = "engine_tools_unavailable"
+	CodeMCPToolsUnavailable    = "mcp_tools_unavailable"
 	CodeToolCallIDRequired     = "tool_call_id_required"
 	CodeToolNameRequired       = "tool_name_required"
 	CodeToolStartedAtRequired  = "tool_started_at_required"
@@ -38,14 +42,19 @@ const (
 	CodeStructuredOutputCapabilityInvalid = "structured_output_capability_invalid"
 
 	// Runtime execution codes (internal/agent Run / audit)
-	CodeRuntimeCancelled          = "runtime_cancelled"
-	CodeRuntimeTimeout            = "runtime_timeout"
-	CodeRuntimeFailed             = "runtime_failed"
-	CodeRuntimeEmptyResponse      = "runtime_empty_response"
-	CodeRuntimeSessionUnavailable = "runtime_session_unavailable"
-	CodeRuntimeInterrupted        = "runtime_interrupted"
-	CodeStructuredOutputInvalid   = "structured_output_invalid"
-	CodeStructuredOutputEmpty     = "structured_output_empty"
+	CodeRuntimeCancelled            = "runtime_cancelled"
+	CodeRuntimeBusy                 = "runtime_busy"
+	CodeRuntimeTimeout              = "runtime_timeout"
+	CodeRuntimeFailed               = "runtime_failed"
+	CodeRuntimeEmptyResponse        = "runtime_empty_response"
+	CodeUserMessageRequired         = "user_message_required"
+	CodeHistoryInvalid              = "history_invalid"
+	CodeRuntimeSessionUnavailable   = "runtime_session_unavailable"
+	CodeRuntimeSessionCleanupFailed = "runtime_session_cleanup_failed"
+	CodeRuntimeInterrupted          = "runtime_interrupted"
+	CodeRunIDConflict               = "run_id_conflict"
+	CodeStructuredOutputInvalid     = "structured_output_invalid"
+	CodeStructuredOutputEmpty       = "structured_output_empty"
 
 	// Audit lifecycle codes (internal/agent BeginAuditRun/EndAuditRun)
 	CodeAuditScopeRequired   = "audit_scope_required"
@@ -53,7 +62,6 @@ const (
 	CodeAuditSessionActive   = "audit_session_active"
 
 	// Storage codes (internal/audit/sqlite)
-	CodeAuditStoreFailed = "audit_store_failed"
 
 	// Transport / protocol error codes
 	CodeUnauthorized           = "unauthorized"
@@ -67,4 +75,12 @@ const (
 // Structured output model adapter codes (internal/agent/structured_output.go)
 const (
 	CodeLLMRequestInvalid = "llm_request_invalid"
+)
+
+// Deprecated aliases preserve stable identifiers that were published before
+// the Engine-specific runtime boundary was generalized to arbitrary MCP servers.
+const (
+	CodeEngineMCPURLMissing    = CodeMCPEndpointEnvMissing
+	CodeEngineToolsUnavailable = CodeMCPToolsUnavailable
+	CodeAuditStoreFailed       = "audit_store_failed"
 )

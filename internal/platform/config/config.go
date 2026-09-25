@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,11 +17,10 @@ type Config struct {
 	InternalToken       string
 	DataDir             string
 	DBPath              string
-	EngineMCPURL        string
-	EngineToken         string
-	EngineContract      string
+	ToolContract        string
 	DeploymentFile      string
-	EngineTimeout       time.Duration
+	MCPTimeout          time.Duration
+	MaxConcurrentRuns   int
 	RunTimeout          time.Duration
 	ShutdownTimeout     time.Duration
 	LLMStructuredOutput string
@@ -42,10 +42,9 @@ func Load() (Config, error) {
 		InternalToken:       getEnv("LIKI_AGENTS_INTERNAL_TOKEN", ""),
 		DataDir:             getEnv("LIKI_AGENTS_DATA_DIR", "./data"),
 		DBPath:              getEnv("LIKI_DB_PATH", ""),
-		EngineMCPURL:        getEnv("LIKI_ENGINE_MCP_URL", ""),
-		EngineToken:         getEnv("LIKI_ENGINE_MCP_TOKEN", ""),
-		EngineContract:      getEnv("LIKI_ENGINE_CONTRACT_VERSION", ""),
+		ToolContract:        getEnv("LIKI_TOOL_CONTRACT_VERSION", ""),
 		DeploymentFile:      getEnv("LIKI_AGENTS_DEPLOYMENT_FILE", ""),
+		MaxConcurrentRuns:   32,
 		LLMBaseURL:          getEnv("LIKI_LLM_BASE_URL", "https://api.openai.com/v1"),
 		LLMAPIKey:           getEnv("LIKI_LLM_API_KEY", ""),
 		LLMModel:            getEnv("LIKI_LLM_MODEL", "gpt-4.1-mini"),
@@ -54,8 +53,14 @@ func Load() (Config, error) {
 		LogFormat:           getEnv("LIKI_LOG_FORMAT", "json"),
 		LogLevel:            getEnv("LIKI_LOG_LEVEL", "info"),
 	}
+	if cfg.LLMStructuredOutput == "none" {
+		cfg.LLMStructuredOutput = ""
+	}
 	var err error
-	if cfg.EngineTimeout, err = getDuration("LIKI_ENGINE_TIMEOUT_SECONDS", 30*time.Second); err != nil {
+	if cfg.MCPTimeout, err = getDuration("LIKI_MCP_TIMEOUT_SECONDS", 30*time.Second); err != nil {
+		return Config{}, err
+	}
+	if cfg.MaxConcurrentRuns, err = getInt("LIKI_MAX_CONCURRENT_RUNS", 32); err != nil {
 		return Config{}, err
 	}
 	if cfg.RunTimeout, err = getDuration("LIKI_RUN_TIMEOUT_SECONDS", 600*time.Second); err != nil {
@@ -74,11 +79,8 @@ func Load() (Config, error) {
 }
 
 func validate(cfg Config) (Config, error) {
-	if cfg.EngineMCPURL == "" {
-		return Config{}, fmt.Errorf("LIKI_ENGINE_MCP_URL is required")
-	}
-	if cfg.EngineContract == "" {
-		return Config{}, fmt.Errorf("LIKI_ENGINE_CONTRACT_VERSION is required")
+	if cfg.ToolContract == "" {
+		return Config{}, fmt.Errorf("LIKI_TOOL_CONTRACT_VERSION is required")
 	}
 	if cfg.Env != "development" && cfg.InternalToken == "" {
 		return Config{}, fmt.Errorf("LIKI_AGENTS_INTERNAL_TOKEN is required outside development")
@@ -104,6 +106,19 @@ func validate(cfg Config) (Config, error) {
 	}
 	if cfg.RunTimeout <= 0 {
 		return Config{}, fmt.Errorf("LIKI_RUN_TIMEOUT_SECONDS must be greater than zero")
+	}
+	if cfg.MCPTimeout <= 0 {
+		return Config{}, fmt.Errorf("LIKI_MCP_TIMEOUT_SECONDS must be greater than zero")
+	}
+	if cfg.MaxConcurrentRuns <= 0 {
+		return Config{}, fmt.Errorf("LIKI_MAX_CONCURRENT_RUNS must be greater than zero")
+	}
+	if cfg.LLMTimeout <= 0 {
+		return Config{}, fmt.Errorf("LIKI_LLM_TIMEOUT_SECONDS must be greater than zero")
+	}
+	if cfg.LLMTemperature < 0 || cfg.LLMTemperature > 2 ||
+		math.IsNaN(cfg.LLMTemperature) || math.IsInf(cfg.LLMTemperature, 0) {
+		return Config{}, fmt.Errorf("LIKI_LLM_TEMPERATURE must be between 0 and 2")
 	}
 	if _, err := url.Parse(cfg.PublicURL); err != nil {
 		return Config{}, fmt.Errorf("LIKI_AGENTS_PUBLIC_URL is invalid: %w", err)
@@ -152,6 +167,18 @@ func getFloat(key string, fallback float64) (float64, error) {
 	value, err := strconv.ParseFloat(raw, 64)
 	if err != nil {
 		return 0, fmt.Errorf("%s is not a valid number: %q", key, raw)
+	}
+	return value, nil
+}
+
+func getInt(key string, fallback int) (int, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s is not a valid integer: %q", key, raw)
 	}
 	return value, nil
 }

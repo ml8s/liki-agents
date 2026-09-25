@@ -68,23 +68,22 @@ func run() error {
 	}
 	metricsCollector := prometheus.New()
 	runtime, err := agentruntime.NewRuntime(agentruntime.Config{
-		AppName:          "liki-agents",
-		Model:            cfg.LLMModel,
-		ModelBaseURL:     cfg.LLMBaseURL,
-		ModelAPIKey:      cfg.LLMAPIKey,
-		ModelTimeout:     cfg.LLMTimeout,
-		Temperature:      cfg.LLMTemperature,
-		AuditRecorder:    sqlite.NewAuditEventRepository(store.GORM()),
-		Metrics:          metricsCollector,
-		TracerProvider:   tracerProvider.Provider(),
-		Provider:         cfg.LLMProvider,
-		StructuredOutput: cfg.LLMStructuredOutput,
-		ContractVersion:  cfg.EngineContract,
-		GraphVersion:     buildinfo.GraphVersion,
-		Deployment:       deployment,
-		EngineMCPURL:     cfg.EngineMCPURL,
-		EngineToken:      cfg.EngineToken,
-		EngineTimeout:    cfg.EngineTimeout,
+		AppName:           "liki-agents",
+		Model:             cfg.LLMModel,
+		ModelBaseURL:      cfg.LLMBaseURL,
+		ModelAPIKey:       cfg.LLMAPIKey,
+		ModelTimeout:      cfg.LLMTimeout,
+		Temperature:       cfg.LLMTemperature,
+		AuditRecorder:     sqlite.NewAuditEventRepository(store.GORM()),
+		Metrics:           metricsCollector,
+		TracerProvider:    tracerProvider.Provider(),
+		Provider:          cfg.LLMProvider,
+		StructuredOutput:  cfg.LLMStructuredOutput,
+		ContractVersion:   cfg.ToolContract,
+		GraphVersion:      buildinfo.GraphVersion,
+		Deployment:        deployment,
+		MCPTimeout:        cfg.MCPTimeout,
+		MaxConcurrentRuns: cfg.MaxConcurrentRuns,
 	})
 	if err != nil {
 		return err
@@ -105,11 +104,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	healthChecks := []platform.HealthChecker{store}
+	healthChecks = append(healthChecks, runtime.MCPHealthChecks()...)
 	protocolServer, err := transport.New(transport.Services{
 		AgentCard:     a2aServer.AgentCardHandler(),
 		A2A:           a2aServer.EndpointHandler(),
 		AGUI:          aguiHandler,
-		HealthChecks:  []platform.HealthChecker{store, runtime},
+		HealthChecks:  healthChecks,
 		Metrics:       metricsCollector,
 		Dependencies:  metricsCollector,
 		MetricsTarget: metricsCollector.Handler(),
@@ -149,7 +150,7 @@ func run() error {
 			"public_url", cfg.PublicURL,
 			"protocols", "A2A,AG-UI,MCP",
 			"env", cfg.Env,
-			"engine", cfg.EngineMCPURL,
+			"mcp_servers", mcpServerNames(deployment),
 			"graph", buildinfo.GraphVersion,
 		)
 		errCh <- httpServer.ListenAndServe()
@@ -166,4 +167,12 @@ func run() error {
 		}
 		return err
 	}
+}
+
+func mcpServerNames(deployment *agentruntime.Deployment) []string {
+	names := make([]string, 0, len(deployment.Spec.MCPServers))
+	for _, server := range deployment.Spec.MCPServers {
+		names = append(names, server.Name)
+	}
+	return names
 }

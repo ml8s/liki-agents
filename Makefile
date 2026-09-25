@@ -17,7 +17,7 @@ help:
 	@echo "make db-backup - create an online SQLite backup"
 	@echo "make db-verify - verify the latest SQLite backup"
 	@echo "make build    - build ./bin/liki-agents"
-	@echo "make dev      - run the development Agent container in the foreground"
+	@echo "make dev      - run the development Agent and MCP containers in the foreground"
 	@echo "make dev-down - remove the development Agent workload"
 	@echo "make validate - validate the AgentDeployment artifact without starting the server"
 
@@ -74,4 +74,4 @@ dev-down:
 	docker compose --project-directory . -f dev/docker-compose.yml down --remove-orphans
 
 dev:
-	docker compose --project-directory . -f dev/docker-compose.yml up --build --abort-on-container-exit liki-agents
+	docker compose --project-directory . --profile mcp -f dev/docker-compose.yml up --build --abort-on-container-exit

@@ -121,9 +121,6 @@ func (a *AgentReferenceAuditor) AfterAgent(ctx adkagent.Context) (*genai.Content
 	key := a.pendingKey(ctx)
 	a.mu.Lock()
 	record, ok := a.pending[key]
-	if ok {
-		delete(a.pending, key)
-	}
 	a.mu.Unlock()
 	if !ok {
 		return nil, domain.NewError(domain.CodeDelegationUnknown, "agent completion has no matching started audit", fmt.Errorf("agent %q invocation %q", ctx.AgentName(), ctx.InvocationID()))
@@ -136,6 +133,9 @@ func (a *AgentReferenceAuditor) AfterAgent(ctx adkagent.Context) (*genai.Content
 	if err := a.record(ctx, scope, record, audit.EventDelegationCompleted); err != nil {
 		return nil, err
 	}
+	a.mu.Lock()
+	delete(a.pending, key)
+	a.mu.Unlock()
 	if a.metrics != nil {
 		a.metrics.ObserveAgentDelegation(record.CallerAgent, record.TargetAgent, string(record.Status), time.Duration(record.DurationMS)*time.Millisecond)
 	}
@@ -235,6 +235,7 @@ func (a *AgentReferenceAuditor) record(ctx context.Context, scope *llmRunScope, 
 		ParentRunID:           scope.runID,
 		ThreadID:              scope.threadID,
 		UserID:                scope.userID,
+		Protocol:              scope.protocol,
 		AgentName:             record.TargetAgent,
 		AgentVersion:          target.Version,
 		AgentDefinitionDigest: target.Digest,

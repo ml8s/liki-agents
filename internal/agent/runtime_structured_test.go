@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -19,12 +20,6 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/genai"
-)
-
-var (
-	testDeploymentOnce  sync.Once
-	testDeploymentValue *Deployment
-	testDeploymentErr   error
 )
 
 func buildTestDeployment() (*Deployment, error) {
@@ -39,6 +34,7 @@ func buildTestDeployment() (*Deployment, error) {
 			"kind": "AgentDeployment",
 			"metadata": {"name": "test-agent", "version": "1.0.0"},
 			"spec": {
+				"mcpServers": [{"name": "test", "endpointEnv": "TEST_MCP_ENDPOINT"}],
 				"agents": [{
 					"name": "main",
 					"version": "1.0.0",
@@ -50,7 +46,7 @@ func buildTestDeployment() (*Deployment, error) {
 						"schema": {"path": "output.schema.json"},
 						"textPointer": "/answer"
 					},
-					"tools": {"allow": ["test_tool"]}
+					"tools": {"allow": {"test": ["test_tool"]}}
 									}]
 			}
 		}`,
@@ -146,6 +142,49 @@ func (f *fakeLLM) GenerateContent(context.Context, *model.LLMRequest, bool) iter
 	}
 }
 
+type blockingLLM struct {
+	started   chan struct{}
+	unblocked chan struct{}
+}
+
+func (f *blockingLLM) Name() string { return "fake-model" }
+
+func (f *blockingLLM) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		close(f.started)
+		<-f.unblocked
+		yield(&model.LLMResponse{
+			Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: `{"answer":"ok"}`}}},
+		}, nil)
+	}
+}
+
+// turnBasedLLM yields one response per model invocation. fakeLLM models chunks
+// within one invocation; tool loops need distinct invocation turns.
+type turnBasedLLM struct {
+	mu    sync.Mutex
+	turn  int
+	turns []*model.LLMResponse
+}
+
+func (f *turnBasedLLM) Name() string { return "fake-model" }
+
+func (f *turnBasedLLM) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		f.mu.Lock()
+		index := f.turn
+		f.turn++
+		response := (*model.LLMResponse)(nil)
+		if index < len(f.turns) {
+			response = f.turns[index]
+		}
+		f.mu.Unlock()
+		if response != nil {
+			yield(response, nil)
+		}
+	}
+}
+
 type recordingAudit struct {
 	mu     sync.Mutex
 	events []audit.Event
@@ -173,21 +212,31 @@ func (r *recordingAudit) eventsOfType(eventType audit.EventType) []audit.Event {
 	return result
 }
 
-// newTestRuntime wires a fake model and an in-memory MCP Engine. This avoids
+// newTestRuntime wires a fake model and an in-memory MCP server. This avoids
 // network dependencies while retaining ADK's real runner and toolset contract.
-func newTestRuntime(t *testing.T, deployment *Deployment, events *recordingAudit, llm *fakeLLM) *Runtime {
+func newTestRuntime(t *testing.T, deployment *Deployment, events *recordingAudit, llm model.LLM) *Runtime {
+	return newTestRuntimeWithLimit(t, deployment, events, llm, 0)
+}
+
+func newTestRuntimeWithLimit(
+	t *testing.T,
+	deployment *Deployment,
+	events *recordingAudit,
+	llm model.LLM,
+	maxRuns int,
+) *Runtime {
 	t.Helper()
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
 	server := mcp.NewServer(&mcp.Implementation{Name: "stub-engine", Version: "test"}, nil)
 	server.AddTool(
 		&mcp.Tool{Name: "test_tool", InputSchema: &jsonschema.Schema{Type: "object"}},
 		func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			return &mcp.CallToolResult{}, nil
+			return &mcp.CallToolResult{StructuredContent: map[string]any{"answer": "tool-output"}}, nil
 		},
 	)
 	serverSession, err := server.Connect(context.Background(), serverTransport, nil)
 	if err != nil {
-		t.Fatalf("connect test Engine: %v", err)
+		t.Fatalf("connect test MCP server: %v", err)
 	}
 	t.Cleanup(func() { _ = serverSession.Close() })
 	entrypoint, err := deployment.EntrypointDefinition()
@@ -199,14 +248,16 @@ func newTestRuntime(t *testing.T, deployment *Deployment, events *recordingAudit
 		structuredOutput = StructuredOutputJSONSchema
 	}
 	runtime, err := NewRuntime(Config{
-		Model:                   "fake-model",
-		Deployment:              deployment,
-		StructuredOutput:        structuredOutput,
-		EngineMCPURL:            "in-memory://test-engine",
-		AuditRecorder:           events,
-		ContractVersion:         "test-contract",
-		modelOverride:           llm,
-		engineTransportOverride: clientTransport,
+		Model:             "fake-model",
+		Deployment:        deployment,
+		StructuredOutput:  structuredOutput,
+		AuditRecorder:     events,
+		ContractVersion:   "test-contract",
+		MaxConcurrentRuns: maxRuns,
+		modelOverride:     llm,
+		mcpTransportOverrides: map[string]mcp.Transport{
+			"test": clientTransport,
+		},
 	})
 	if err != nil {
 		t.Fatalf("NewRuntime() error = %v", err)
@@ -250,6 +301,164 @@ func TestRuntimeRunReturnsPlainTextForGenericAgent(t *testing.T) {
 	}
 	if got := len(events.eventsOfType(audit.EventRunCompleted)); got != 1 {
 		t.Fatalf("completed run audit events = %d, want 1", got)
+	}
+}
+
+func TestRuntimeRunRejectsDuplicateRunID(t *testing.T) {
+	events := &recordingAudit{}
+	runtime := newTestRuntime(t, plainTestDeployment(t), events, &fakeLLM{responses: []*model.LLMResponse{{
+		Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "first"}}},
+	}}})
+	request := RunRequest{
+		RunID: "run_duplicate", ThreadID: "thread_1", UserID: "user_1", UserMessage: "hello",
+	}
+	if _, err := runtime.Run(context.Background(), request, nil); err != nil {
+		t.Fatalf("first Run() error = %v", err)
+	}
+	_, err := runtime.Run(context.Background(), request, nil)
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeRunIDConflict {
+		t.Fatalf("second Run() error = %v, want %s", err, domain.CodeRunIDConflict)
+	}
+}
+
+func TestRuntimeRunRejectsWorkBeyondConcurrentRunLimit(t *testing.T) {
+	events := &recordingAudit{}
+	llm := &blockingLLM{started: make(chan struct{}), unblocked: make(chan struct{})}
+	runtime := newTestRuntimeWithLimit(t, NewTestDeployment(t), events, llm, 1)
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := runtime.Run(context.Background(), RunRequest{
+			RunID: "run_active", ThreadID: "thread_1", UserID: "user_1", UserMessage: "first",
+		}, nil)
+		firstDone <- err
+	}()
+
+	select {
+	case <-llm.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first run did not reach the model")
+	}
+	limitedCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_, err := runtime.Run(limitedCtx, RunRequest{
+		RunID: "run_limited", ThreadID: "thread_1", UserID: "user_1", UserMessage: "second",
+	}, nil)
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeRuntimeBusy {
+		t.Fatalf("limited Run() error = %v, want %s", err, domain.CodeRuntimeBusy)
+	}
+	close(llm.unblocked)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Run() error = %v", err)
+	}
+}
+
+func TestRuntimeRunDeletesRunScopedSession(t *testing.T) {
+	events := &recordingAudit{}
+	runtime := newTestRuntime(t, plainTestDeployment(t), events, &fakeLLM{responses: []*model.LLMResponse{{
+		Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "complete"}}},
+	}}})
+	request := RunRequest{
+		RunID: "run_cleanup", ThreadID: "thread_1", UserID: "user_1", UserMessage: "hello",
+	}
+	if _, err := runtime.Run(context.Background(), request, nil); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	response, err := runtime.sessions.Get(context.Background(), &session.GetRequest{
+		AppName:   runtime.config.AppName,
+		UserID:    request.UserID,
+		SessionID: "run:" + request.RunID,
+	})
+	if err == nil && response != nil && response.Session != nil {
+		t.Fatal("run-scoped ADK session survived terminal run")
+	}
+}
+
+func TestExternalAuditRunDeletesExternalSession(t *testing.T) {
+	events := &recordingAudit{}
+	runtime := newTestRuntime(t, NewTestDeployment(t), events, &fakeLLM{})
+	ctx := context.Background()
+	scope := AuditRunScope{
+		RunID:    "a2a_task",
+		ThreadID: "a2a_context",
+		UserID:   "user_1",
+		Protocol: "a2a",
+	}
+	if err := runtime.BeginAuditRun(ctx, "a2a_context", scope); err != nil {
+		t.Fatalf("BeginAuditRun() error = %v", err)
+	}
+	if err := runtime.EndAuditRun(ctx, "a2a_context", nil); err != nil {
+		t.Fatalf("EndAuditRun() error = %v", err)
+	}
+	response, err := runtime.sessions.Get(ctx, &session.GetRequest{
+		AppName:   runtime.config.AppName,
+		UserID:    scope.UserID,
+		SessionID: "a2a_context",
+	})
+	if err == nil && response != nil && response.Session != nil {
+		t.Fatal("external ADK session survived terminal run")
+	}
+}
+
+type terminalAuditRecorder struct {
+	delegate *recordingAudit
+}
+
+func (r *terminalAuditRecorder) Record(_ context.Context, event *audit.Event) error {
+	if event != nil && event.Type == audit.EventRunCompleted {
+		return domain.NewError(audit.CodeAuditAppendFailed, "terminal audit write failed", nil)
+	}
+	return r.delegate.Record(context.Background(), event)
+}
+
+func TestRuntimeRunFailsClosedWhenTerminalAuditWriteFails(t *testing.T) {
+	events := &recordingAudit{}
+	runtime := newTestRuntime(t, plainTestDeployment(t), events, &fakeLLM{responses: []*model.LLMResponse{{
+		Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "complete"}}},
+	}}})
+	failing := &terminalAuditRecorder{delegate: events}
+	runtime.config.AuditRecorder = failing
+	_, err := runtime.Run(context.Background(), RunRequest{
+		RunID: "run_audit_fail", ThreadID: "thread_1", UserID: "user_1", UserMessage: "hello",
+	}, nil)
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || domainErr.Code != audit.CodeAuditAppendFailed {
+		t.Fatalf("Run() error = %v, want terminal audit failure", err)
+	}
+}
+
+// TestRuntimeRunExecutesMCPToolBeforeAuditCompletion prevents an observability
+// callback from accidentally replacing the tool invocation with its arguments.
+func TestRuntimeRunExecutesMCPToolBeforeAuditCompletion(t *testing.T) {
+	events := &recordingAudit{}
+	runtime := newTestRuntime(t, plainTestDeployment(t), events, &turnBasedLLM{turns: []*model.LLMResponse{
+		{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{ID: "call_tool", Name: "test_tool"}},
+		}}},
+		{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "final answer"}}}},
+	}})
+
+	result, err := runtime.Run(context.Background(), RunRequest{
+		RunID: "run_tool", ThreadID: "thread_tool", UserID: "user_1", UserMessage: "use tool",
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Text != "final answer" {
+		t.Fatalf("Text = %q, want final answer", result.Text)
+	}
+	completed := events.eventsOfType(audit.EventToolCallCompleted)
+	if len(completed) != 1 {
+		t.Fatalf("completed tool audit events = %d, want 1", len(completed))
+	}
+	inputDigest, _ := completed[0].Payload["input_digest"].(string)
+	outputDigest, _ := completed[0].Payload["output_digest"].(string)
+	if inputDigest == "" || outputDigest == "" {
+		t.Fatalf("tool audit digests = %#v", completed[0].Payload)
+	}
+	if inputDigest == outputDigest {
+		t.Fatal("tool output digest equals input digest; ADK did not execute the tool")
 	}
 }
 
@@ -394,6 +603,7 @@ func TestRuntimeRunLLMError(t *testing.T) {
 // NewTestDeployment exposes the generic test deployment to external adapter
 // tests compiled into the same test binary.
 func NewTestDeployment(t testing.TB) *Deployment {
+	t.Setenv("TEST_MCP_ENDPOINT", "in-memory://test")
 	deployment, err := testDeployment()
 	if err != nil {
 		t.Fatal(err)
@@ -413,14 +623,14 @@ func TestRuntimeBuildsStandardADKAgentGraph(t *testing.T) {
 		Mode:        AgentModeTask,
 		Instruction: deployment.Spec.Agents[0].Instruction,
 		Output:      deployment.Spec.Agents[0].Output,
-		Tools:       ToolAllowlist{Allow: []string{"test_tool"}},
+		Tools:       ToolAllowlist{Allow: map[string][]string{"test": {"test_tool"}}},
 	})
 	if err := deployment.validate(); err != nil {
 		t.Fatalf("validate multi-agent deployment: %v", err)
 	}
 	for index := range deployment.Spec.Agents {
 		agent := &deployment.Spec.Agents[index]
-		if err := agent.validate(); err != nil {
+		if err := agent.validate(map[string]struct{}{"test": {}}); err != nil {
 			t.Fatalf("validate agent %q: %v", agent.Name, err)
 		}
 	}

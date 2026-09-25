@@ -27,6 +27,7 @@ func TestEventValidate(t *testing.T) {
 		{name: "missing id", mutate: func(e *Event) { e.ID = "" }, wantCode: CodeIDRequired},
 		{name: "unsupported schema", mutate: func(e *Event) { e.SchemaVersion = "audit.liki/v0" }, wantCode: CodeSchemaUnsupported},
 		{name: "missing type", mutate: func(e *Event) { e.Type = "" }, wantCode: CodeTypeRequired},
+		{name: "unknown type", mutate: func(e *Event) { e.Type = "run.deleted" }, wantCode: CodeTypeInvalid},
 		{name: "missing occurred at", mutate: func(e *Event) { e.OccurredAt = time.Time{} }, wantCode: CodeOccurredAtRequired},
 		{name: "missing run id", mutate: func(e *Event) { e.RunID = "" }, wantCode: CodeRunIDRequired},
 		{name: "missing root run id", mutate: func(e *Event) { e.RootRunID = "" }, wantCode: CodeRootRunIDRequired},
@@ -65,7 +66,27 @@ func TestEventValidate(t *testing.T) {
 				e.ErrorCode = ""
 				e.Status = StatusFailed
 			},
-			wantCode: CodeToolExecutionFailed,
+			wantCode: CodeErrorCodeRequired,
+		},
+		{
+			name: "llm event missing provenance",
+			mutate: func(e *Event) {
+				e.Type = EventLLMCallCompleted
+				e.Status = StatusSucceeded
+				e.AgentName = ""
+				e.Model = ""
+			},
+			wantCode: CodeLLMProvenanceRequired,
+		},
+		{
+			name: "delegation event missing provenance",
+			mutate: func(e *Event) {
+				e.Type = EventDelegationStarted
+				e.Status = StatusRunning
+				e.CallerAgent = ""
+				e.TargetAgent = ""
+			},
+			wantCode: CodeDelegationProvenanceRequired,
 		},
 	}
 	for _, testCase := range testCases {

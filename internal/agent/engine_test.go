@@ -24,17 +24,30 @@ func TestCheckHealthUsesCurrentMCPDiscovery(t *testing.T) {
 	if !health.OK {
 		t.Fatalf("CheckHealth() = %+v, want ready", health)
 	}
-	if health.Name != "engine_mcp" {
+	if health.Name != "mcp" {
 		t.Fatalf("dependency name = %q", health.Name)
 	}
 	if !probe.sawDiscover {
-		t.Fatal("engine did not receive server/discover")
+		t.Fatal("server did not receive server/discover")
 	}
 	if probe.sawPing {
 		t.Error("health probe sent retired ping RPC")
 	}
-	if probe.requestedVersion != engineMCPProtocolVersion() {
-		t.Fatalf("requested MCP version = %q, want %q", probe.requestedVersion, engineMCPProtocolVersion())
+	if probe.requestedVersion != mcpProtocolVersion() {
+		t.Fatalf("requested MCP version = %q, want %q", probe.requestedVersion, mcpProtocolVersion())
+	}
+}
+
+func TestMCPHealthChecksExposeEachLogicalServer(t *testing.T) {
+	t.Parallel()
+
+	_, runtime := newHealthTestRuntime(t, &mcp.ServerOptions{}, "test_tool")
+	checkers := runtime.MCPHealthChecks()
+	if len(checkers) != 1 {
+		t.Fatalf("MCP health checkers = %d, want 1", len(checkers))
+	}
+	if got := checkers[0].CheckHealth(context.Background()).Name; got != "mcp/test" {
+		t.Fatalf("MCP health name = %q, want mcp/test", got)
 	}
 }
 
@@ -61,7 +74,7 @@ func TestCheckHealthRejectsMissingToolCapability(t *testing.T) {
 	_, runtime := newHealthTestRuntime(t, options, "")
 	health := runtime.CheckHealth(context.Background())
 	if health.OK {
-		t.Fatal("CheckHealth() accepted an Engine without tool capability")
+		t.Fatal("CheckHealth() accepted a server without tool capability")
 	}
 }
 
@@ -109,19 +122,28 @@ func newHealthTestRuntime(t *testing.T, options *mcp.ServerOptions, toolName str
 	t.Cleanup(func() { _ = serverSession.Close() })
 
 	return probe, &Runtime{config: Config{
-		EngineTimeout:           5 * time.Second,
-		engineTransportOverride: clientTransport,
-	}, entrypoint: &AgentDefinition{Name: "test-agent", Tools: ToolAllowlist{Allow: []string{toolName}}}}
+		MCPTimeout: 5 * time.Second,
+		mcpTransportOverrides: map[string]mcp.Transport{
+			"test": clientTransport,
+		},
+		Deployment: &Deployment{Spec: DeploymentSpec{
+			MCPServers: []MCPServerDefinition{{Name: "test", EndpointEnv: "TEST_MCP_ENDPOINT"}},
+			Agents: []AgentDefinition{{
+				Name:  "test-agent",
+				Tools: ToolAllowlist{Allow: map[string][]string{"test": {toolName}}},
+			}},
+		}},
+	}}
 }
 
 func TestCheckHealthRejectsMissingAllowedTool(t *testing.T) {
 	t.Parallel()
 
 	_, runtime := newHealthTestRuntime(t, &mcp.ServerOptions{}, "available_tool")
-	runtime.entrypoint = &AgentDefinition{Name: "test-agent", Tools: ToolAllowlist{Allow: []string{"missing_tool"}}}
+	runtime.config.Deployment.Spec.Agents[0].Tools = ToolAllowlist{Allow: map[string][]string{"test": {"missing_tool"}}}
 	health := runtime.CheckHealth(context.Background())
 	if health.OK {
-		t.Fatal("CheckHealth() accepted an Engine missing an allowlisted tool")
+		t.Fatal("CheckHealth() accepted a server missing an allowlisted tool")
 	}
 }
 
@@ -130,17 +152,17 @@ func TestCheckHealthValidatesEveryAgentAllowlist(t *testing.T) {
 
 	_, runtime := newHealthTestRuntime(t, &mcp.ServerOptions{}, "available_tool")
 	runtime.config.Deployment = &Deployment{Spec: DeploymentSpec{
+		MCPServers: []MCPServerDefinition{{Name: "test", EndpointEnv: "TEST_MCP_ENDPOINT"}},
 		Agents: []AgentDefinition{
-			{Name: "entrypoint", Tools: ToolAllowlist{Allow: []string{"available_tool"}}},
-			{Name: "worker", Tools: ToolAllowlist{Allow: []string{"missing_tool"}}},
+			{Name: "entrypoint", Tools: ToolAllowlist{Allow: map[string][]string{"test": {"available_tool"}}}},
+			{Name: "worker", Tools: ToolAllowlist{Allow: map[string][]string{"test": {"missing_tool"}}}},
 		},
 	}}
 	health := runtime.CheckHealth(context.Background())
 	if health.OK {
 		t.Fatal("CheckHealth() validated only the entrypoint allowlist")
 	}
-	if !strings.Contains(health.Detail, `agent "worker"`) ||
-		!strings.Contains(health.Detail, `tool "missing_tool"`) {
-		t.Fatalf("health detail = %q, want missing agent and tool", health.Detail)
+	if !strings.Contains(health.Detail, `test: missing required tool "missing_tool"`) {
+		t.Fatalf("health detail = %q, want missing server and tool", health.Detail)
 	}
 }

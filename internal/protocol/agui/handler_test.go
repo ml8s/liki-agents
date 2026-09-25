@@ -2,6 +2,7 @@ package agui_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -31,12 +32,13 @@ func (r *recordingAuditEvents) Record(_ context.Context, event *audit.Event) err
 
 func newRuntime(t *testing.T) *agent.Runtime {
 	t.Helper()
+	deployment := testagent.Deployment(t)
+	t.Setenv("TEST_MCP_ENDPOINT", "http://127.0.0.1:9/mcp")
 	runtime, err := agent.NewRuntime(agent.Config{
 		Model:            "test-model",
 		ModelAPIKey:      "test-key",
-		Deployment:       testagent.Deployment(t),
+		Deployment:       deployment,
 		StructuredOutput: "json_schema",
-		EngineMCPURL:     "http://127.0.0.1:1/mcp",
 		GraphVersion:     "test-graph",
 		ContractVersion:  "test-contract",
 		AuditRecorder:    &recordingAuditEvents{},
@@ -72,10 +74,32 @@ func TestAGUIRejectsMalformedInput(t *testing.T) {
 	}
 }
 
+func TestAGUIRejectsOversizedIdentifiersBeforeStreamStarts(t *testing.T) {
+	handler, err := agui.New(&capturingRuntime{capture: &agent.RunRequest{}}, agui.Config{RunTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"threadId":%q,"messages":[{"role":"user","content":"hi"}]}`, strings.Repeat("t", 129))
+	request := authenticatedRequest(t, body)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("oversized identifier status = %d, want %d", response.Code, http.StatusUnprocessableEntity)
+	}
+	if strings.Contains(response.Body.String(), "RUN_STARTED") {
+		t.Fatalf("stream started before validation: %s", response.Body.String())
+	}
+}
+
 type scriptedRuntime struct {
 	events []*session.Event
 	result agent.RunResult
 	err    error
+}
+
+func (r *scriptedRuntime) Entrypoint() *agent.AgentDefinition {
+	return &agent.AgentDefinition{Name: "main"}
 }
 
 func (r *scriptedRuntime) Run(_ context.Context, _ agent.RunRequest, observe func(*session.Event) error) (agent.RunResult, error) {
@@ -351,6 +375,43 @@ func TestAGUIPassesHistoryToRuntime(t *testing.T) {
 type capturingRuntime struct {
 	capture *agent.RunRequest
 	result  agent.RunResult
+}
+
+type runFinishedFailureWriter struct {
+	*httptest.ResponseRecorder
+}
+
+func (w *runFinishedFailureWriter) Write(body []byte) (int, error) {
+	written, err := w.ResponseRecorder.Write(body)
+	if err == nil && strings.Contains(string(body), `"RUN_FINISHED"`) {
+		return written, errors.New("stream failed after run finished")
+	}
+	return written, err
+}
+
+func TestAGUIDoesNotEmitRunErrorAfterRunFinished(t *testing.T) {
+	runtime := &capturingRuntime{
+		capture: &agent.RunRequest{},
+		result:  agent.RunResult{Text: "complete"},
+	}
+	handler, err := agui.New(runtime, agui.Config{RunTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := &runFinishedFailureWriter{ResponseRecorder: httptest.NewRecorder()}
+	handler.ServeHTTP(response, authenticatedRequest(t, `{"threadId":"t","runId":"r","messages":[{"id":"m","role":"user","content":"hi"}]}`))
+
+	body := response.Body.String()
+	if !strings.Contains(body, "RUN_FINISHED") {
+		t.Fatalf("RUN_FINISHED was not written: %s", body)
+	}
+	if strings.Contains(body, "RUN_ERROR") {
+		t.Fatal("RUN_ERROR followed RUN_FINISHED")
+	}
+}
+
+func (r *capturingRuntime) Entrypoint() *agent.AgentDefinition {
+	return &agent.AgentDefinition{Name: "main"}
 }
 
 func (r *capturingRuntime) Run(_ context.Context, request agent.RunRequest, _ func(*session.Event) error) (agent.RunResult, error) {

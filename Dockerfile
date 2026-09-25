@@ -1,10 +1,11 @@
+# syntax=docker/dockerfile:1
 FROM golang:1.26.6-alpine AS build
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_TIME=unknown
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY cmd ./cmd
 COPY internal ./internal
 COPY contracts ./contracts

@@ -17,7 +17,7 @@ func TestEventProjectorStreamsPlainTextDeltas(t *testing.T) {
 			Description: "plain text agent",
 			Mode:        AgentModeChat,
 			Instruction: FileReference{Path: "instruction.md"},
-			Tools:       ToolAllowlist{Allow: []string{}},
+			Tools:       ToolAllowlist{Allow: map[string][]string{}},
 		}}},
 	}
 	projector := newEventProjector(deployment)
@@ -48,7 +48,7 @@ func TestEventProjectorHidesStructuredPayload(t *testing.T) {
 				Schema:      FileReference{Path: "schema.json"},
 				TextPointer: "/answer",
 			},
-			Tools: ToolAllowlist{Allow: []string{}},
+			Tools: ToolAllowlist{Allow: map[string][]string{}},
 		}}},
 	}
 	projector := newEventProjector(deployment)
@@ -63,6 +63,21 @@ func TestEventProjectorHidesStructuredPayload(t *testing.T) {
 	projected, visible := projector.Project(event)
 	if visible || projected != nil {
 		t.Fatalf("projected = %#v, visible = %v; structured payload must be hidden", projected, visible)
+	}
+}
+
+func TestEventProjectorPreservesStateOnlyFinalEvent(t *testing.T) {
+	projector := newEventProjector(plainTextDeployment())
+	event := &session.Event{
+		Author: "main",
+		Actions: session.EventActions{
+			StateDelta: map[string]any{StructuredOutputStateKey("main"): map[string]any{}},
+		},
+	}
+
+	projected, visible := projector.Project(event)
+	if !visible || projected == nil || projected.Content != nil {
+		t.Fatalf("projected = %#v, visible = %v; want state-only event without content", projected, visible)
 	}
 }
 
@@ -109,7 +124,7 @@ func TestEventProjectorKeepsToolFactWhenSuppressingFinalText(t *testing.T) {
 		LLMResponse: model.LLMResponse{
 			Content: &genai.Content{Parts: []*genai.Part{
 				{Text: "Hello world"},
-				{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "engine_tool"}},
+				{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "test_tool"}},
 			}},
 		},
 	}
@@ -131,7 +146,7 @@ func plainTextDeployment() *Deployment {
 			Description: "plain text agent",
 			Mode:        AgentModeChat,
 			Instruction: FileReference{Path: "instruction.md"},
-			Tools:       ToolAllowlist{Allow: []string{}},
+			Tools:       ToolAllowlist{Allow: map[string][]string{}},
 		}}},
 	}
 }

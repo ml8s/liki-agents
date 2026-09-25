@@ -11,8 +11,7 @@ func baseEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("LIKI_ENV", "development")
 	t.Setenv("LIKI_AGENTS_PUBLIC_URL", "https://agent.internal")
-	t.Setenv("LIKI_ENGINE_MCP_URL", "http://127.0.0.1:18081/mcp")
-	t.Setenv("LIKI_ENGINE_CONTRACT_VERSION", "test-engine")
+	t.Setenv("LIKI_TOOL_CONTRACT_VERSION", "test-tool-contract")
 	t.Setenv("LIKI_AGENTS_DEPLOYMENT_FILE", "/tmp/agent-deployment.json")
 	t.Setenv("LIKI_LLM_PROVIDER", "zhipu")
 	t.Setenv("LIKI_LLM_STRUCTURED_OUTPUT", "json_object")
@@ -21,15 +20,24 @@ func baseEnv(t *testing.T) {
 
 func TestLoadValidConfiguration(t *testing.T) {
 	baseEnv(t)
+	t.Setenv("LIKI_LLM_STRUCTURED_OUTPUT", "none")
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.LLMProvider != "zhipu" || cfg.LLMStructuredOutput != "json_object" {
+	if cfg.LLMProvider != "zhipu" || cfg.LLMStructuredOutput != "" {
 		t.Fatalf("provider/capability = %q/%q", cfg.LLMProvider, cfg.LLMStructuredOutput)
 	}
 	if cfg.DeploymentFile != "/tmp/agent-deployment.json" {
 		t.Fatalf("definition file = %q", cfg.DeploymentFile)
+	}
+	t.Setenv("LIKI_MAX_CONCURRENT_RUNS", "7")
+	cfg, err = config.Load()
+	if err != nil {
+		t.Fatalf("Load(max concurrent runs) error = %v", err)
+	}
+	if cfg.MaxConcurrentRuns != 7 {
+		t.Fatalf("max concurrent runs = %d, want 7", cfg.MaxConcurrentRuns)
 	}
 }
 
@@ -46,6 +54,12 @@ func TestLoadRejectsInvalidSettings(t *testing.T) {
 		{name: "invalid public url", key: "LIKI_AGENTS_PUBLIC_URL", value: "agent.internal", wantErr: "LIKI_AGENTS_PUBLIC_URL must be an absolute HTTP(S) URL"},
 		{name: "invalid llm url", key: "LIKI_LLM_BASE_URL", value: "api.example", wantErr: "LIKI_LLM_BASE_URL must be an absolute HTTP(S) URL"},
 		{name: "invalid duration", key: "LIKI_RUN_TIMEOUT_SECONDS", value: "abc", wantErr: "LIKI_RUN_TIMEOUT_SECONDS"},
+		{name: "zero MCP timeout", key: "LIKI_MCP_TIMEOUT_SECONDS", value: "0", wantErr: "LIKI_MCP_TIMEOUT_SECONDS"},
+		{name: "zero concurrent runs", key: "LIKI_MAX_CONCURRENT_RUNS", value: "0", wantErr: "LIKI_MAX_CONCURRENT_RUNS"},
+		{name: "invalid concurrent runs", key: "LIKI_MAX_CONCURRENT_RUNS", value: "many", wantErr: "LIKI_MAX_CONCURRENT_RUNS"},
+		{name: "zero LLM timeout", key: "LIKI_LLM_TIMEOUT_SECONDS", value: "0", wantErr: "LIKI_LLM_TIMEOUT_SECONDS"},
+		{name: "negative temperature", key: "LIKI_LLM_TEMPERATURE", value: "-0.1", wantErr: "LIKI_LLM_TEMPERATURE"},
+		{name: "high temperature", key: "LIKI_LLM_TEMPERATURE", value: "2.1", wantErr: "LIKI_LLM_TEMPERATURE"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {

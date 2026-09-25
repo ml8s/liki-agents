@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,35 +30,46 @@ type llmRunScope struct {
 	runID             domain.ID
 	threadID          domain.ID
 	userID            string
+	startedAt         time.Time
 	agentName         string
+	protocol          string
 	model             string
 	graph             string
 	contract          string
 	instructionDigest string
+	releaseRun        func()
 	definitionName    string
 	definitionVersion string
 	definitionDigest  string
 	nextCall          int
-	lastByModel       map[string]llmCallRuntime
+	activeCalls       map[string]llmCallRuntime
 }
 
 type llmCallRuntime struct {
-	id        string
-	model     string
-	startedAt time.Time
+	id                string
+	model             string
+	agentName         string
+	instructionDigest string
+	startedAt         time.Time
 }
 
 func newLLMLedger(recorder audit.Recorder, metrics Metrics, provider string, deployment *Deployment, now func() time.Time) *llmLedger {
 	if now == nil {
 		now = time.Now
 	}
-	return &llmLedger{
-		recorder: recorder,
-		metrics:  metrics,
-		provider: provider,
-		now:      now,
-		scopes:   make(map[string]*llmRunScope),
+	ledger := &llmLedger{
+		recorder:   recorder,
+		metrics:    metrics,
+		provider:   provider,
+		now:        now,
+		deployment: deployment,
+		agents:     make(map[string]*AgentDefinition, len(deployment.Spec.Agents)),
+		scopes:     make(map[string]*llmRunScope),
 	}
+	for index := range deployment.Spec.Agents {
+		ledger.agents[deployment.Spec.Agents[index].Name] = &deployment.Spec.Agents[index]
+	}
+	return ledger
 }
 
 func (l *llmLedger) begin(sessionID string, scope *llmRunScope) bool {
@@ -98,9 +110,16 @@ func (l *llmLedger) scope(sessionID string) (*llmRunScope, bool) {
 }
 
 func (l *llmLedger) beforeModel(ctx agent.Context, request *model.LLMRequest) (*model.LLMResponse, error) {
+	if request == nil {
+		return nil, domain.NewError(domain.CodeLLMRequestInvalid, "LLM request is required", domain.ErrInvalidInput)
+	}
 	scope, ok := l.scope(ctx.SessionID())
 	if !ok || l.recorder == nil {
 		return nil, nil
+	}
+	callbackKey, err := llmCallbackKey(ctx)
+	if err != nil {
+		return nil, err
 	}
 	modelName := request.Model
 	if modelName == "" {
@@ -134,12 +153,18 @@ func (l *llmLedger) beforeModel(ctx agent.Context, request *model.LLMRequest) (*
 	if err := call.Validate(); err != nil {
 		return nil, err
 	}
-	if err := l.recordCall(ctx, call, audit.EventLLMCallStarted, audit.StatusRunning); err != nil {
+	if err := l.recordCall(ctx, scope.protocol, call, audit.EventLLMCallStarted, audit.StatusRunning); err != nil {
 		return nil, err
 	}
-	runtime := llmCallRuntime{id: callID, model: modelName, startedAt: startedAt}
+	runtime := llmCallRuntime{
+		id:                callID,
+		model:             modelName,
+		agentName:         call.AgentName,
+		instructionDigest: call.PromptVersion,
+		startedAt:         startedAt,
+	}
 	scope.mu.Lock()
-	scope.lastByModel[modelName] = runtime
+	scope.activeCalls[callbackKey] = runtime
 	scope.mu.Unlock()
 	return nil, nil
 }
@@ -153,14 +178,16 @@ func (l *llmLedger) afterModel(ctx agent.Context, response *model.LLMResponse, r
 	if response != nil && response.ModelVersion != "" {
 		modelName = response.ModelVersion
 	}
+	callbackKey, err := llmCallbackKey(ctx)
+	if err != nil {
+		return response, err
+	}
 	scope.mu.Lock()
-	runtime, exists := scope.lastByModel[modelName]
+	runtime, exists := scope.activeCalls[callbackKey]
+	scope.mu.Unlock()
 	if !exists {
-		scope.mu.Unlock()
 		return response, responseErr
 	}
-	delete(scope.lastByModel, modelName)
-	scope.mu.Unlock()
 
 	finishedAt := l.now()
 	call := &domain.LLMCall{
@@ -194,9 +221,20 @@ func (l *llmLedger) afterModel(ctx agent.Context, response *model.LLMResponse, r
 	if err := call.Validate(); err != nil {
 		return response, err
 	}
-	if auditErr := l.recordCall(context.WithoutCancel(ctx), call, audit.EventLLMCallCompleted, audit.StatusSucceeded); auditErr != nil {
+	terminalEvent := audit.EventLLMCallCompleted
+	terminalStatus := audit.StatusSucceeded
+	if call.Status == domain.LLMCallFailed {
+		terminalEvent = audit.EventLLMCallFailed
+		terminalStatus = audit.StatusFailed
+	}
+	if auditErr := l.recordCall(context.WithoutCancel(ctx), scope.protocol, call, terminalEvent, terminalStatus); auditErr != nil {
 		return response, auditErr
 	}
+	scope.mu.Lock()
+	// Retain the active call if Record fails so run reconciliation can emit a
+	// terminal audit fact rather than leaving started evidence permanently open.
+	delete(scope.activeCalls, callbackKey)
+	scope.mu.Unlock()
 	if l.metrics != nil {
 		l.metrics.ObserveLLMCall(call.Model, string(call.Status), domain.LLMTokenUsage{
 			PromptTokens:     call.PromptTokens,
@@ -217,20 +255,22 @@ func (l *llmLedger) onModelError(ctx agent.Context, request *model.LLMRequest, r
 	if modelName == "" {
 		modelName = scope.model
 	}
+	callbackKey, err := llmCallbackKey(ctx)
+	if err != nil {
+		return nil, err
+	}
 	scope.mu.Lock()
-	runtime, exists := scope.lastByModel[modelName]
-	if exists {
-		delete(scope.lastByModel, modelName)
-		scope.mu.Unlock()
-	} else {
+	runtime, exists := scope.activeCalls[callbackKey]
+	scope.mu.Unlock()
+	if !exists {
 		scope.nextCall++
 		callSeq := scope.nextCall
 		runtime = llmCallRuntime{
 			id:        fmt.Sprintf("%s/%s/%d", ctx.InvocationID(), modelName, callSeq),
 			model:     modelName,
+			agentName: ctx.AgentName(),
 			startedAt: l.now(),
 		}
-		scope.mu.Unlock()
 	}
 	finishedAt := l.now()
 	call := &domain.LLMCall{
@@ -258,8 +298,13 @@ func (l *llmLedger) onModelError(ctx agent.Context, request *model.LLMRequest, r
 	if err := call.Validate(); err != nil {
 		return nil, err
 	}
-	if auditErr := l.recordCall(context.WithoutCancel(ctx), call, audit.EventLLMCallFailed, audit.StatusFailed); auditErr != nil {
+	if auditErr := l.recordCall(context.WithoutCancel(ctx), scope.protocol, call, audit.EventLLMCallFailed, audit.StatusFailed); auditErr != nil {
 		return nil, auditErr
+	}
+	if exists {
+		scope.mu.Lock()
+		delete(scope.activeCalls, callbackKey)
+		scope.mu.Unlock()
 	}
 	if l.metrics != nil {
 		l.metrics.ObserveLLMCall(call.Model, string(call.Status), domain.LLMTokenUsage{
@@ -276,24 +321,33 @@ func (l *llmLedger) failActive(scope *llmRunScope, err error, finishedAt time.Ti
 	scope.mu.Lock()
 	defer scope.mu.Unlock()
 	var firstErr error
-	for _, runtime := range scope.lastByModel {
+	for callbackKey, runtime := range scope.activeCalls {
 		call := &domain.LLMCall{
 			ID: runtime.id, RunID: scope.runID, ThreadID: scope.threadID,
-			UserID: scope.userID, AgentName: scope.agentName, Model: runtime.model,
+			UserID: scope.userID, AgentName: runtime.agentName, Model: runtime.model,
 			Provider: l.provider, Status: domain.LLMCallFailed,
 			GraphVersion: scope.graph, ContractVersion: scope.contract,
-			PromptVersion: scope.instructionDigest,
+			PromptVersion: runtime.instructionDigest,
 			StartedAt:     runtime.startedAt, FinishedAt: finishedAt,
 		}
 		call.DurationMS = finishedAt.Sub(call.StartedAt).Milliseconds()
 		call.Fail(err, finishedAt)
-		l.applyAgent(call, scope.agentName)
-		if recordErr := l.recordCall(context.Background(), call, audit.EventLLMCallFailed, audit.StatusFailed); recordErr != nil && firstErr == nil {
+		l.applyAgent(call, call.AgentName)
+		recordErr := l.recordCall(context.Background(), scope.protocol, call, audit.EventLLMCallFailed, audit.StatusFailed)
+		if recordErr == nil {
+			delete(scope.activeCalls, callbackKey)
+		} else if firstErr == nil {
 			firstErr = recordErr
 		}
 	}
-	scope.lastByModel = make(map[string]llmCallRuntime)
 	return firstErr
+}
+
+func (l *llmLedger) reconcile(scope *llmRunScope, cause error) error {
+	if scope == nil {
+		return nil
+	}
+	return l.failActive(scope, cause, l.now())
 }
 
 func (l *llmLedger) applyAgent(call *domain.LLMCall, name string) {
@@ -304,9 +358,10 @@ func (l *llmLedger) applyAgent(call *domain.LLMCall, name string) {
 	call.AgentName = definition.Name
 	call.AgentVersion = definition.Version
 	call.AgentDefinitionDigest = definition.Digest
+	call.PromptVersion = definition.InstructionDigest
 }
 
-func (l *llmLedger) recordCall(ctx context.Context, call *domain.LLMCall, eventType audit.EventType, status audit.Status) error {
+func (l *llmLedger) recordCall(ctx context.Context, protocol string, call *domain.LLMCall, eventType audit.EventType, status audit.Status) error {
 	if l.recorder == nil {
 		return domain.NewError(domain.CodeAuditRecorderMissing, "audit recorder is required", nil)
 	}
@@ -321,12 +376,27 @@ func (l *llmLedger) recordCall(ctx context.Context, call *domain.LLMCall, eventT
 		AgentName:             call.AgentName,
 		AgentVersion:          call.AgentVersion,
 		AgentDefinitionDigest: call.AgentDefinitionDigest,
+		DefinitionName:        call.DefinitionName,
+		DefinitionVersion:     call.DefinitionVersion,
+		DefinitionDigest:      call.DefinitionDigest,
 		Model:                 call.Model,
 		Provider:              call.Provider,
+		Protocol:              protocol,
 		Status:                status,
 		DurationMS:            call.DurationMS,
 		ErrorCode:             call.ErrorCode,
 		ErrorMessage:          call.ErrorMessage,
+		TraceID:               traceIDFromContext(ctx),
+		SpanID:                spanIDFromContext(ctx),
+		Payload: map[string]any{
+			"graph_version":     call.GraphVersion,
+			"contract_version":  call.ContractVersion,
+			"prompt_version":    call.PromptVersion,
+			"prompt_tokens":     call.PromptTokens,
+			"completion_tokens": call.CompletionTokens,
+			"thought_tokens":    call.ThoughtTokens,
+			"total_tokens":      call.TotalTokens,
+		},
 	}
 	if eventType == audit.EventLLMCallStarted {
 		event.OccurredAt = call.StartedAt
@@ -349,4 +419,12 @@ func llmUsageFromResponse(usage *genai.GenerateContentResponseUsageMetadata) dom
 		ThoughtTokens:    int64(usage.ThoughtsTokenCount),
 		TotalTokens:      int64(usage.TotalTokenCount),
 	}
+}
+
+func llmCallbackKey(ctx agent.Context) (string, error) {
+	invocationID := strings.TrimSpace(ctx.InvocationID())
+	if invocationID == "" {
+		return "", domain.NewError(domain.CodeRuntimeFailed, "ADK invocation id is required for LLM audit correlation", nil)
+	}
+	return invocationID, nil
 }

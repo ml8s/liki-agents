@@ -27,7 +27,7 @@ func newDelegationAuditor(t *testing.T, branch string) (*AgentReferenceAuditor, 
 		SubAgents:   []AgentReference{},
 		Instruction: deployment.Spec.Agents[0].Instruction,
 		Output:      deployment.Spec.Agents[0].Output,
-		Tools:       ToolAllowlist{Allow: []string{"test_tool"}},
+		Tools:       ToolAllowlist{Allow: map[string][]string{"test": {"test_tool"}}},
 	})
 	if err := deployment.validate(); err != nil {
 		t.Fatalf("validate deployment: %v", err)
@@ -135,6 +135,46 @@ func TestAgentReferenceAuditorFailsPending(t *testing.T) {
 	}
 	if got := len(events.eventsOfType(audit.EventDelegationFailed)); got != 1 {
 		t.Fatalf("failed events after second pass = %d, want 1", got)
+	}
+}
+
+func TestAgentReferenceAuditorRetainsPendingWhenTerminalAuditWriteFails(t *testing.T) {
+	events := &failOnceAudit{eventType: audit.EventDelegationCompleted}
+	deployment := NewTestDeployment(t)
+	deployment.Spec.Agents[0].Name = "coordinator"
+	deployment.Spec.Agents[0].SubAgents = []AgentReference{{Name: "worker"}}
+	deployment.Spec.Agents = append(deployment.Spec.Agents, AgentDefinition{
+		Name:        "worker",
+		Version:     "1.0.0",
+		Description: "worker",
+		Mode:        AgentModeTask,
+		Instruction: deployment.Spec.Agents[0].Instruction,
+		Tools:       ToolAllowlist{Allow: map[string][]string{}},
+	})
+	if err := deployment.validate(); err != nil {
+		t.Fatalf("validate deployment: %v", err)
+	}
+	scope := newTestScope()
+	ledger := newLLMLedger(events, nil, "test-provider", deployment, fixedLedgerNow)
+	ledger.begin("session_1", scope)
+	auditor := newAgentReferenceAuditor(events, nil, fixedLedgerNow, deployment, "coordinator", ledger.scope)
+	ctx := &fakeAgentContext{
+		sessionID:    "session_1",
+		invocationID: "inv_worker",
+		agentName:    "worker",
+		branch:       "coordinator.worker",
+	}
+	if _, err := auditor.BeforeAgent(ctx); err != nil {
+		t.Fatalf("BeforeAgent() error = %v", err)
+	}
+	if _, err := auditor.AfterAgent(ctx); err == nil {
+		t.Fatal("AfterAgent() unexpectedly survived terminal audit failure")
+	}
+	if err := auditor.FailPending(context.Background(), scope, nil); err != nil {
+		t.Fatalf("FailPending() reconciliation error = %v", err)
+	}
+	if got := len(events.eventsOfType(audit.EventDelegationFailed)); got != 1 {
+		t.Fatalf("terminal failed events = %d, want 1", got)
 	}
 }
 

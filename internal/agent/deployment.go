@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -23,6 +24,10 @@ import (
 const (
 	AgentAPIVersion = "agent.liki/v1"
 	AgentKind       = "AgentDeployment"
+
+	maxManifestBytes       = 2 << 20
+	maxTextArtifactBytes   = 2 << 20
+	maxSchemaArtifactBytes = 4 << 20
 )
 
 type Deployment struct {
@@ -40,7 +45,14 @@ type DeploymentMetadata struct {
 }
 
 type DeploymentSpec struct {
-	Agents []AgentDefinition `json:"agents"`
+	MCPServers []MCPServerDefinition `json:"mcpServers"`
+	Agents     []AgentDefinition     `json:"agents"`
+}
+
+type MCPServerDefinition struct {
+	Name        string `json:"name"`
+	EndpointEnv string `json:"endpointEnv"`
+	TokenEnv    string `json:"tokenEnv,omitempty"`
 }
 
 type AgentMode string
@@ -90,7 +102,12 @@ func (o OutputDefinition) Structured() bool {
 }
 
 type ToolAllowlist struct {
-	Allow []string `json:"allow"`
+	Allow map[string][]string `json:"allow"`
+}
+
+type ToolReference struct {
+	Server string `json:"server"`
+	Name   string `json:"name"`
 }
 
 type DefinitionRef struct {
@@ -117,6 +134,9 @@ func LoadAgentDeployment(path string) (*Deployment, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read agent deployment: %w", err)
 	}
+	if len(raw) > maxManifestBytes {
+		return nil, fmt.Errorf("agent deployment manifest exceeds %d bytes", maxManifestBytes)
+	}
 	if err := validateAgainstContract(raw); err != nil {
 		return nil, fmt.Errorf("validate agent deployment contract: %w", err)
 	}
@@ -142,10 +162,8 @@ func validateAgainstContract(raw []byte) error {
 		return fmt.Errorf("resolve JSON Schema contract: %w", err)
 	}
 	var document any
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if err := decoder.Decode(&document); err != nil {
-		return fmt.Errorf("decode JSON document: %w", err)
+	if err := decodeStrictJSON(raw, &document); err != nil {
+		return err
 	}
 	if err := contract.Validate(document); err != nil {
 		return fmt.Errorf("JSON Schema validation failed: %w", err)
@@ -161,13 +179,94 @@ func (d *Deployment) Validate() error {
 }
 
 func decodeAgentDeployment(raw []byte) (*Deployment, error) {
-	decoder := json.NewDecoder(strings.NewReader(string(raw)))
-	decoder.DisallowUnknownFields()
 	var deployment Deployment
-	if err := decoder.Decode(&deployment); err != nil {
+	if err := decodeStrictJSON(raw, &deployment); err != nil {
 		return nil, fmt.Errorf("decode agent deployment: %w", err)
 	}
 	return &deployment, nil
+}
+
+// decodeStrictJSON rejects duplicate object keys, trailing JSON values, and
+// unknown typed fields. Artifact digests must not make ambiguous JSON portable.
+func decodeStrictJSON(raw []byte, target any) error {
+	if err := rejectDuplicateJSONKeys(raw); err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("decode JSON document: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("JSON document contains trailing values")
+		}
+		return fmt.Errorf("decode JSON trailing input: %w", err)
+	}
+	return nil
+}
+
+func rejectDuplicateJSONKeys(raw []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := rejectDuplicateKeysInValue(decoder, "$"); err != nil {
+		return fmt.Errorf("JSON object key conflict: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("trailing JSON value")
+		}
+		return fmt.Errorf("trailing JSON input: %w", err)
+	}
+	return nil
+}
+
+func rejectDuplicateKeysInValue(decoder *json.Decoder, path string) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return fmt.Errorf("read JSON token: %w", err)
+	}
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return fmt.Errorf("read object key: %w", err)
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return fmt.Errorf("expected object key at %s", path)
+			}
+			if _, exists := seen[key]; exists {
+				return fmt.Errorf("duplicate key %q at %s", key, path)
+			}
+			seen[key] = struct{}{}
+			if err := rejectDuplicateKeysInValue(decoder, path+"."+key); err != nil {
+				return err
+			}
+		}
+		_, err = decoder.Token()
+		return err
+	case '[':
+		index := 0
+		for decoder.More() {
+			if err := rejectDuplicateKeysInValue(decoder, fmt.Sprintf("%s[%d]", path, index)); err != nil {
+				return err
+			}
+			index++
+		}
+		_, err = decoder.Token()
+		return err
+	default:
+		return fmt.Errorf("unexpected delimiter %q", delim)
+	}
 }
 
 func (d *Deployment) validate() error {
@@ -183,6 +282,17 @@ func (d *Deployment) validate() error {
 	if strings.TrimSpace(d.Metadata.Version) == "" {
 		return fmt.Errorf("agent deployment metadata.version is required")
 	}
+	mcpServers := make(map[string]struct{}, len(d.Spec.MCPServers))
+	for index := range d.Spec.MCPServers {
+		server := &d.Spec.MCPServers[index]
+		if err := server.validate(); err != nil {
+			return fmt.Errorf("mcpServers[%d]: %w", index, err)
+		}
+		if _, exists := mcpServers[server.Name]; exists {
+			return fmt.Errorf("mcpServers[%d]: duplicate MCP server %q", index, server.Name)
+		}
+		mcpServers[server.Name] = struct{}{}
+	}
 	if len(d.Spec.Agents) == 0 {
 		return fmt.Errorf("agent deployment must contain at least one agent")
 	}
@@ -190,16 +300,28 @@ func (d *Deployment) validate() error {
 	names := make(map[string]struct{}, len(d.Spec.Agents))
 	for index := range d.Spec.Agents {
 		agent := &d.Spec.Agents[index]
-		if err := agent.validate(); err != nil {
+		if err := agent.validate(mcpServers); err != nil {
 			return fmt.Errorf("agent[%d]: %w", index, err)
 		}
 		if _, exists := names[agent.Name]; exists {
 			return fmt.Errorf("duplicate agent name %q", agent.Name)
 		}
 		names[agent.Name] = struct{}{}
-		names[agent.Name] = struct{}{}
 	}
 	return d.validateAgentGraph(names)
+}
+
+func (s *MCPServerDefinition) validate() error {
+	if strings.TrimSpace(s.Name) == "" || s.Name != strings.TrimSpace(s.Name) {
+		return fmt.Errorf("name is required")
+	}
+	if strings.TrimSpace(s.EndpointEnv) == "" || s.EndpointEnv != strings.TrimSpace(s.EndpointEnv) {
+		return fmt.Errorf("endpointEnv is required")
+	}
+	if s.TokenEnv != "" && s.TokenEnv != strings.TrimSpace(s.TokenEnv) {
+		return fmt.Errorf("tokenEnv cannot contain padding whitespace")
+	}
+	return nil
 }
 
 func (d *Deployment) validateAgentGraph(names map[string]struct{}) error {
@@ -295,7 +417,7 @@ func (d *Deployment) validateAgentGraph(names map[string]struct{}) error {
 	return nil
 }
 
-func (a *AgentDefinition) validate() error {
+func (a *AgentDefinition) validate(mcpServers map[string]struct{}) error {
 	if strings.TrimSpace(a.Name) == "" {
 		return fmt.Errorf("name is required")
 	}
@@ -330,29 +452,74 @@ func (a *AgentDefinition) validate() error {
 	if strings.Contains(a.Name, ".") || strings.ContainsAny(a.Name, " \t\r\n") {
 		return fmt.Errorf("name %q contains characters incompatible with ADK branch paths", a.Name)
 	}
-	seen := make(map[string]struct{}, len(a.Tools.Allow))
-	for _, tool := range a.Tools.Allow {
-		if tool == "" || strings.TrimSpace(tool) != tool {
-			return fmt.Errorf("tools.allow contains an empty tool name")
+	seen := make(map[ToolReference]struct{})
+	seenNames := make(map[string]string)
+	for server, tools := range a.Tools.Allow {
+		if _, exists := mcpServers[server]; !exists {
+			return fmt.Errorf("tools.allow references unknown MCP server %q", server)
 		}
-		if len(tool) > 128 {
-			return fmt.Errorf("tools.allow tool name exceeds MCP maximum length of 128")
-		}
-		for _, char := range tool {
-			if char >= 'a' && char <= 'z' ||
-				char >= 'A' && char <= 'Z' ||
-				char >= '0' && char <= '9' ||
-				char == '_' || char == '-' || char == '.' {
-				continue
+		for _, tool := range tools {
+			if tool == "" || strings.TrimSpace(tool) != tool {
+				return fmt.Errorf("tools.allow[%s] contains an empty tool name", server)
 			}
-			return fmt.Errorf("tools.allow tool name %q contains a character invalid for MCP", tool)
+			if len(tool) > 128 {
+				return fmt.Errorf("tools.allow[%s] tool name exceeds MCP maximum length of 128", server)
+			}
+			for _, char := range tool {
+				if char >= 'a' && char <= 'z' ||
+					char >= 'A' && char <= 'Z' ||
+					char >= '0' && char <= '9' ||
+					char == '_' || char == '-' || char == '.' {
+					continue
+				}
+				return fmt.Errorf("tools.allow[%s] tool name %q contains a character invalid for MCP", server, tool)
+			}
+			reference := ToolReference{Server: server, Name: tool}
+			if _, exists := seen[reference]; exists {
+				return fmt.Errorf("duplicate tool %q for MCP server %q", tool, server)
+			}
+			if previous, exists := seenNames[tool]; exists {
+				return fmt.Errorf("tool %q is allowlisted by multiple MCP servers (%q and %q)", tool, previous, server)
+			}
+			seen[reference] = struct{}{}
+			seenNames[tool] = server
 		}
-		if _, exists := seen[tool]; exists {
-			return fmt.Errorf("duplicate tool %q", tool)
-		}
-		seen[tool] = struct{}{}
 	}
 	return nil
+}
+
+// ToolReferenceFor returns the logical MCP server binding for a tool name.
+// Deployment validation rejects duplicate tool names across servers for one
+// Agent, making this lookup deterministic after artifact validation.
+func (a *AgentDefinition) ToolReferenceFor(toolName string) (ToolReference, bool) {
+	servers := make([]string, 0, len(a.Tools.Allow))
+	for server := range a.Tools.Allow {
+		servers = append(servers, server)
+	}
+	slices.Sort(servers)
+	for _, server := range servers {
+		if slices.Contains(a.Tools.Allow[server], toolName) {
+			return ToolReference{Server: server, Name: toolName}, true
+		}
+	}
+	return ToolReference{}, false
+}
+
+// References returns the allowlist as a stable, server-scoped list.
+func (t ToolAllowlist) References() []ToolReference {
+	references := make([]ToolReference, 0)
+	for server, tools := range t.Allow {
+		for _, name := range tools {
+			references = append(references, ToolReference{Server: server, Name: name})
+		}
+	}
+	slices.SortFunc(references, func(a, b ToolReference) int {
+		if compare := strings.Compare(a.Server, b.Server); compare != 0 {
+			return compare
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	return references
 }
 
 func (l *definitionLoader) loadAgents(deployment *Deployment) error {
@@ -361,6 +528,9 @@ func (l *definitionLoader) loadAgents(deployment *Deployment) error {
 		instructionRaw, err := l.readFile(agent.Instruction.Path)
 		if err != nil {
 			return fmt.Errorf("agent %q instruction: %w", agent.Name, err)
+		}
+		if len(instructionRaw) > maxTextArtifactBytes {
+			return fmt.Errorf("agent %q instruction exceeds %d bytes", agent.Name, maxTextArtifactBytes)
 		}
 		instruction := string(instructionRaw)
 		if strings.TrimSpace(instruction) == "" {
@@ -373,10 +543,11 @@ func (l *definitionLoader) loadAgents(deployment *Deployment) error {
 			if err != nil {
 				return fmt.Errorf("agent %q output schema: %w", agent.Name, err)
 			}
+			if len(schemaRaw) > maxSchemaArtifactBytes {
+				return fmt.Errorf("agent %q output schema exceeds %d bytes", agent.Name, maxSchemaArtifactBytes)
+			}
 			var outputSchema jsonschema.Schema
-			decoder := json.NewDecoder(strings.NewReader(string(schemaRaw)))
-			decoder.DisallowUnknownFields()
-			if err := decoder.Decode(&outputSchema); err != nil {
+			if err := decodeStrictJSON(schemaRaw, &outputSchema); err != nil {
 				return fmt.Errorf("agent %q decode output schema: %w", agent.Name, err)
 			}
 			resolved, err := outputSchema.Resolve(nil)
@@ -395,9 +566,7 @@ func (l *definitionLoader) loadAgents(deployment *Deployment) error {
 			agent.SchemaDigest = sha256Hex(schemaRaw)
 			agent.GenaiOutputSchema = genaiSchema
 			var rawOutputSchema map[string]any
-			rawDecoder := json.NewDecoder(strings.NewReader(string(schemaRaw)))
-			rawDecoder.UseNumber()
-			if err := rawDecoder.Decode(&rawOutputSchema); err != nil {
+			if err := decodeStrictJSON(schemaRaw, &rawOutputSchema); err != nil {
 				return fmt.Errorf("agent %q decode raw output schema: %w", agent.Name, err)
 			}
 			agent.RawOutputSchema = rawOutputSchema
@@ -548,12 +717,11 @@ type agentDigestInput struct {
 	InstructionDigest string           `json:"instructionDigest"`
 	SchemaDigest      string           `json:"schemaDigest,omitempty"`
 	TextPointer       string           `json:"textPointer,omitempty"`
-	Tools             []string         `json:"tools"`
+	Tools             []ToolReference  `json:"tools"`
 }
 
 func agentDigestInputFrom(definition *AgentDefinition) agentDigestInput {
-	tools := append([]string(nil), definition.Tools.Allow...)
-	slices.Sort(tools)
+	references := definition.Tools.References()
 	return agentDigestInput{
 		Name:              definition.Name,
 		Version:           definition.Version,
@@ -563,7 +731,7 @@ func agentDigestInputFrom(definition *AgentDefinition) agentDigestInput {
 		InstructionDigest: definition.InstructionDigest,
 		SchemaDigest:      definition.SchemaDigest,
 		TextPointer:       definition.Output.TextPointer,
-		Tools:             tools,
+		Tools:             references,
 	}
 }
 

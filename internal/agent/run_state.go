@@ -2,7 +2,9 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/ml8s/liki-agents/internal/domain"
@@ -77,40 +79,60 @@ func (s *runState) consume(event *session.Event) {
 }
 
 func (s *runState) consumeStructuredOutput(value any, definition *AgentDefinition) error {
+	result, err := ParseStructuredOutput(value, definition)
+	if err != nil {
+		return err
+	}
+	s.output = result
+	return nil
+}
+
+// ParseStructuredOutput is the single protocol-independent finalizer for ADK
+// structured-output state. Every protocol receives the same validation,
+// canonical JSON, and user-facing pointer text.
+func ParseStructuredOutput(value any, definition *AgentDefinition) (OutputResult, error) {
 	var document any
 	switch typed := value.(type) {
 	case string:
-		if err := json.Unmarshal([]byte(typed), &document); err != nil {
-			return domain.NewError(domain.CodeStructuredOutputInvalid, "decode structured agent output", err)
+		var err error
+		if document, err = decodeJSONDocument([]byte(typed)); err != nil {
+			return OutputResult{}, domain.NewError(domain.CodeStructuredOutputInvalid, "decode structured agent output", err)
 		}
 	default:
 		raw, err := json.Marshal(typed)
 		if err != nil {
-			return domain.NewError(domain.CodeStructuredOutputInvalid, "encode structured agent output", err)
+			return OutputResult{}, domain.NewError(domain.CodeStructuredOutputInvalid, "encode structured agent output", err)
 		}
-		if err := json.Unmarshal(raw, &document); err != nil {
-			return domain.NewError(domain.CodeStructuredOutputInvalid, "decode structured agent output", err)
+		if document, err = decodeJSONDocument(raw); err != nil {
+			return OutputResult{}, domain.NewError(domain.CodeStructuredOutputInvalid, "decode structured agent output", err)
 		}
 	}
-	if err := definition.ResolvedOutput.Validate(document); err != nil {
-		return domain.NewError(domain.CodeStructuredOutputInvalid, "validate structured agent output", err)
+	if err := definition.ResolvedOutput.Validate(schemaValue(document)); err != nil {
+		return OutputResult{}, domain.NewError(domain.CodeStructuredOutputInvalid, "validate structured agent output", err)
 	}
 	text, err := jsonStringAtPointer(document, definition.Output.TextPointer)
 	if err != nil {
-		return domain.NewError(domain.CodeStructuredOutputInvalid, "extract structured answer text", err)
+		return OutputResult{}, domain.NewError(domain.CodeStructuredOutputInvalid, "extract structured answer text", err)
 	}
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return domain.NewError(domain.CodeStructuredOutputEmpty, "structured agent output has no answer text", nil)
+		return OutputResult{}, domain.NewError(domain.CodeStructuredOutputEmpty, "structured agent output has no answer text", nil)
 	}
-	s.output = OutputResult{JSON: canonicalJSON(document), Text: text}
-	return nil
+	return OutputResult{JSON: canonicalJSON(document), Text: text}, nil
 }
 
 // OutputText extracts the Agent-declared user-facing text from validated
 // structured output. Protocol adapters use this so they cannot hard-code a
 // domain schema shape.
 func OutputText(value any, pointer string) (string, error) {
+	if encoded, ok := value.(string); ok {
+		var decoded any
+		var err error
+		if decoded, err = decodeJSONDocument([]byte(encoded)); err != nil {
+			return "", fmt.Errorf("decode structured output: %w", err)
+		}
+		value = decoded
+	}
 	return jsonStringAtPointer(value, pointer)
 }
 
@@ -145,6 +167,50 @@ func canonicalJSON(value any) json.RawMessage {
 	return raw
 }
 
+func decodeJSONDocument(raw []byte) (any, error) {
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.UseNumber()
+	var document any
+	if err := decoder.Decode(&document); err != nil {
+		return nil, err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, errors.New("trailing JSON value")
+		}
+		return nil, err
+	}
+	return document, nil
+}
+
+func schemaValue(value any) any {
+	switch typed := value.(type) {
+	case json.Number:
+		if integer, err := typed.Int64(); err == nil {
+			return integer
+		}
+		if number, err := typed.Float64(); err == nil {
+			return number
+		}
+		return typed.String()
+	case map[string]any:
+		result := make(map[string]any, len(typed))
+		for key, item := range typed {
+			result[key] = schemaValue(item)
+		}
+		return result
+	case []any:
+		result := make([]any, len(typed))
+		for index, item := range typed {
+			result[index] = schemaValue(item)
+		}
+		return result
+	default:
+		return value
+	}
+}
+
 func buildUserContent(request RunRequest) *genai.Content {
 	var prompt strings.Builder
 	prompt.WriteString("<request_context>")
@@ -154,20 +220,32 @@ func buildUserContent(request RunRequest) *genai.Content {
 		prompt.WriteString("{}")
 	}
 	prompt.WriteString("</request_context>\n<user_message>")
-	prompt.WriteString(request.UserMessage)
+	writeJSONString(&prompt, request.UserMessage)
 	prompt.WriteString("</user_message>\n")
 
 	if len(request.History) != 0 {
-		prompt.WriteString("\n<conversation_history>\n")
+		prompt.WriteString("\n<conversation_history format=\"json-array\">\n")
 		for _, message := range request.History {
-			prompt.WriteString("<message role=\"")
-			prompt.WriteString(string(message.Role))
-			prompt.WriteString("\">")
-			prompt.WriteString(message.Content)
-			prompt.WriteString("</message>\n")
+			prompt.WriteString(`{"role":`)
+			writeJSONString(&prompt, string(message.Role))
+			prompt.WriteString(`,"content":`)
+			writeJSONString(&prompt, message.Content)
+			prompt.WriteString("}\n")
 		}
 		prompt.WriteString("</conversation_history>\n")
 	}
 
 	return genai.NewContentFromText(prompt.String(), genai.RoleUser)
+}
+
+func writeJSONString(prompt *strings.Builder, value string) {
+	// json.Marshal handles quotes, backslashes, control characters, and UTF-8
+	// escaping. Untrusted text therefore cannot close the surrounding framing.
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		// string marshalling is total; retain content rather than fail the run.
+		prompt.WriteString(`"unable-to-encode-message"`)
+		return
+	}
+	prompt.Write(encoded)
 }

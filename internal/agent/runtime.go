@@ -1,6 +1,6 @@
 // Package agent owns the single ADK execution graph and its external model and
-// Engine MCP dependencies. Protocol packages adapt this runtime; they never
-// create a second execution path.
+// MCP dependencies. Protocol packages adapt this runtime; they never create a
+// second execution path.
 package agent
 
 import (
@@ -9,18 +9,21 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ml8s/liki-agents/internal/audit"
 	"github.com/ml8s/liki-agents/internal/domain"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
-	"google.golang.org/adk/v2/auth"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/openaimodel"
 	"google.golang.org/adk/v2/plugin"
@@ -32,11 +35,15 @@ import (
 )
 
 const (
-	// structuredOutputStateKey matches llmagent.Config.OutputKey. ADK parses
+	// structuredOutputStateKeyPrefix matches llmagent.Config.OutputKey. ADK parses
 	// the model reply against OutputSchema, clears Event.Output before
 	// yielding it, and persists the parsed value into session state under
 	// this key. Session state is the framework contract for consuming it.
-	structuredOutputStateKey = "structured_analysis"
+	structuredOutputStateKeyPrefix = "structured_analysis:"
+
+	// maxCompletedRunIDs bounds duplicate-run detection without turning the
+	// in-memory lifecycle registry into another durable run store.
+	maxCompletedRunIDs = 4096
 )
 
 type Runtime struct {
@@ -51,6 +58,59 @@ type Runtime struct {
 	delegationAuditor *AgentReferenceAuditor
 	toolAuditor       *ToolExecutionAuditor
 	tracer            trace.Tracer
+	runs              *runLifecycle
+	runSlots          chan struct{}
+}
+
+type runLifecycle struct {
+	mu        sync.Mutex
+	active    map[string]struct{}
+	completed map[string]struct{}
+	order     []string
+}
+
+func (r *Runtime) acquireRun(ctx context.Context) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, runtimeError(err)
+	}
+	select {
+	case r.runSlots <- struct{}{}:
+		return func() { <-r.runSlots }, nil
+	default:
+		return nil, domain.NewError(domain.CodeRuntimeBusy, "runtime is at its concurrent run limit", ctx.Err())
+	}
+}
+
+func newRunLifecycle() *runLifecycle {
+	return &runLifecycle{
+		active:    make(map[string]struct{}),
+		completed: make(map[string]struct{}),
+	}
+}
+
+func (l *runLifecycle) begin(runID string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if _, exists := l.active[runID]; exists {
+		return false
+	}
+	if _, exists := l.completed[runID]; exists {
+		return false
+	}
+	l.active[runID] = struct{}{}
+	return true
+}
+
+func (l *runLifecycle) finish(runID string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.active, runID)
+	l.completed[runID] = struct{}{}
+	l.order = append(l.order, runID)
+	if len(l.order) > maxCompletedRunIDs {
+		delete(l.completed, l.order[0])
+		l.order = l.order[1:]
+	}
 }
 
 func NewRuntime(config Config) (*Runtime, error) {
@@ -65,9 +125,6 @@ func NewRuntime(config Config) (*Runtime, error) {
 	}
 	if config.ModelTimeout <= 0 {
 		config.ModelTimeout = 120 * time.Second
-	}
-	if config.EngineMCPURL == "" {
-		return nil, domain.NewError(domain.CodeEngineMCPURLMissing, "Engine MCP URL is required", domain.ErrInvalidInput)
 	}
 	if config.AuditRecorder == nil {
 		return nil, domain.NewError(domain.CodeAuditRecorderMissing, "audit recorder is required", domain.ErrInvalidInput)
@@ -94,8 +151,11 @@ func NewRuntime(config Config) (*Runtime, error) {
 		structuredAgents == 0 && config.StructuredOutput != StructuredOutputNone {
 		return nil, domain.NewError(domain.CodeStructuredOutputCapabilityInvalid, "structured output capability does not match AgentDeployment", domain.ErrInvalidInput)
 	}
-	if config.EngineTimeout <= 0 {
-		config.EngineTimeout = 30 * time.Second
+	if config.MCPTimeout <= 0 {
+		config.MCPTimeout = 30 * time.Second
+	}
+	if config.MaxConcurrentRuns <= 0 {
+		config.MaxConcurrentRuns = 32
 	}
 	if config.Now == nil {
 		config.Now = func() time.Time { return time.Now().UTC() }
@@ -135,7 +195,7 @@ func NewRuntime(config Config) (*Runtime, error) {
 	}
 	temperature := float32(config.Temperature)
 	ledger := newLLMLedger(config.AuditRecorder, config.Metrics, config.Provider, config.Deployment, config.Now)
-	engineTools, err := newEngineToolset(config)
+	mcpToolsets, err := newMCPToolsets(config)
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +228,7 @@ func NewRuntime(config Config) (*Runtime, error) {
 		building[definition.Name] = struct{}{}
 		outputKey := ""
 		if definition.Output.Structured() {
-			outputKey = structuredOutputStateKey
+			outputKey = StructuredOutputStateKey(definition.Name)
 		}
 		subAgents := make([]agent.Agent, 0, len(definition.SubAgents))
 		for _, reference := range definition.SubAgents {
@@ -182,12 +242,22 @@ func NewRuntime(config Config) (*Runtime, error) {
 			}
 			subAgents = append(subAgents, subAgent)
 		}
-		toolset := tool.FilterToolset(engineTools, tool.AllowedToolsPredicate(definition.Tools.Allow))
+		toolsets := make([]tool.Toolset, 0, len(config.Deployment.Spec.MCPServers))
+		for index, server := range config.Deployment.Spec.MCPServers {
+			allowed := definition.Tools.Allow[server.Name]
+			if len(allowed) == 0 {
+				continue
+			}
+			toolsets = append(toolsets, tool.FilterToolset(
+				mcpToolsets[index],
+				tool.AllowedToolsPredicate(allowed),
+			))
+		}
 		delete(building, definition.Name)
 		built, err := llmagent.New(definition.ADKConfig(ADKAgentRuntime{
 			RawOutputSchema: definition.RawOutputSchema,
 			Model:           aiModel,
-			Toolset:         toolset,
+			Toolsets:        toolsets,
 			SubAgents:       subAgents,
 			Temperature:     temperature,
 			OutputKey:       outputKey,
@@ -258,33 +328,97 @@ func NewRuntime(config Config) (*Runtime, error) {
 		tracer:            tracer,
 		definition:        config.Deployment,
 		entrypoint:        entrypoint,
+		runs:              newRunLifecycle(),
+		runSlots:          make(chan struct{}, config.MaxConcurrentRuns),
 	}, nil
 }
 
-func newEngineToolset(config Config) (tool.Toolset, error) {
-	var credential auth.CredentialProvider
-	if config.EngineToken != "" {
-		credential = auth.StaticToken(config.EngineToken)
+func newMCPToolsets(config Config) ([]tool.Toolset, error) {
+	toolsets := make([]tool.Toolset, 0, len(config.Deployment.Spec.MCPServers))
+	for _, definition := range config.Deployment.Spec.MCPServers {
+		resolved, err := resolveMCPServer(definition)
+		if err != nil {
+			return nil, err
+		}
+		if _, overridden := config.mcpTransportOverrides[definition.Name]; !overridden {
+			if err := validateMCPEndpoint(resolved); err != nil {
+				return nil, err
+			}
+		}
+		var transport mcp.Transport = newMCPTransport(config, resolved)
+		if override, ok := config.mcpTransportOverrides[definition.Name]; ok {
+			transport = override
+		}
+		toolset, err := mcptoolset.New(mcptoolset.Config{
+			Transport: transport,
+		})
+		if err != nil {
+			return nil, domain.NewError(domain.CodeMCPToolsUnavailable, fmt.Sprintf("create MCP toolset %q", definition.Name), err)
+		}
+		toolsets = append(toolsets, toolset)
 	}
-	engineTools, err := mcptoolset.New(mcptoolset.Config{
-		Transport: newEngineToolTransport(config),
-		Auth:      credential,
-	})
-	if err != nil {
-		return nil, domain.NewError(domain.CodeEngineToolsUnavailable, "create Engine MCP toolset", err)
-	}
-	return engineTools, nil
+	return toolsets, nil
 }
 
-func agentMode(mode AgentMode) llmagent.Mode {
-	switch mode {
-	case AgentModeTask:
-		return llmagent.ModeTask
-	case AgentModeSingleTurn:
-		return llmagent.ModeSingleTurn
-	default:
-		return llmagent.ModeChat
+type resolvedMCPServer struct {
+	definition MCPServerDefinition
+	Endpoint   string
+	Token      string
+}
+
+func resolveMCPServers(definitions []MCPServerDefinition) ([]resolvedMCPServer, error) {
+	resolved := make([]resolvedMCPServer, 0, len(definitions))
+	for _, definition := range definitions {
+		server, err := resolveMCPServer(definition)
+		if err != nil {
+			return nil, err
+		}
+		resolved = append(resolved, server)
 	}
+	return resolved, nil
+}
+
+func resolveMCPServer(definition MCPServerDefinition) (resolvedMCPServer, error) {
+	endpoint, ok := os.LookupEnv(definition.EndpointEnv)
+	if !ok || strings.TrimSpace(endpoint) == "" {
+		return resolvedMCPServer{}, domain.NewError(
+			domain.CodeMCPEndpointEnvMissing,
+			fmt.Sprintf("MCP endpoint environment %q is required for server %q", definition.EndpointEnv, definition.Name),
+			nil,
+		)
+	}
+	resolved := resolvedMCPServer{definition: definition, Endpoint: strings.TrimSpace(endpoint)}
+	if definition.TokenEnv == "" {
+		return resolved, nil
+	}
+	token, ok := os.LookupEnv(definition.TokenEnv)
+	if !ok {
+		return resolvedMCPServer{}, domain.NewError(
+			domain.CodeMCPEndpointEnvMissing,
+			fmt.Sprintf("MCP token environment %q is required for server %q", definition.TokenEnv, definition.Name),
+			nil,
+		)
+	}
+	resolved.Token = token
+	return resolved, nil
+}
+
+func validateMCPEndpoint(server resolvedMCPServer) error {
+	endpointURL, err := url.Parse(server.Endpoint)
+	if err != nil ||
+		endpointURL.Scheme != "http" && endpointURL.Scheme != "https" ||
+		endpointURL.Host == "" ||
+		endpointURL.User != nil {
+		return domain.NewError(
+			domain.CodeMCPEndpointInvalid,
+			fmt.Sprintf(
+				"MCP endpoint environment %q must be an absolute HTTP(S) URL without credentials",
+				server.definition.EndpointEnv,
+			),
+			nil,
+		)
+	}
+	return nil
 }
 
 // RootAgent exposes the single ADK graph to standard protocol adapters. ADK
@@ -305,6 +439,7 @@ type AuditRunScope struct {
 	RunID    string
 	ThreadID string
 	UserID   string
+	Protocol string
 }
 
 // BeginAuditRun attaches protocol identity to model callbacks when an official
@@ -316,14 +451,35 @@ func (r *Runtime) BeginAuditRun(ctx context.Context, sessionID string, scope Aud
 	if scope.RunID == "" || scope.ThreadID == "" || scope.UserID == "" {
 		return domain.NewError(domain.CodeAuditScopeRequired, "run, thread, and user identifiers are required", domain.ErrInvalidInput)
 	}
+	if !validProtocolIdentifier(scope.RunID) {
+		return domain.NewError(domain.CodeRunIDInvalid, "run id must contain at most 128 printable bytes", domain.ErrInvalidInput)
+	}
+	if !validProtocolIdentifier(scope.ThreadID) {
+		return domain.NewError(domain.CodeThreadIDInvalid, "thread id must contain at most 128 printable bytes", domain.ErrInvalidInput)
+	}
+	if !validProtocolIdentifier(scope.UserID) {
+		return domain.NewError(domain.CodeUserIDInvalid, "user id must contain at most 128 printable bytes", domain.ErrInvalidInput)
+	}
+	if err := r.ensureDurableRunID(ctx, scope.RunID); err != nil {
+		return err
+	}
 	if sessionID == "" {
 		return domain.NewError(domain.CodeAuditSessionRequired, "audit session identifier is required", domain.ErrInvalidInput)
 	}
-	started := r.llm.begin(sessionID, &llmRunScope{
+	if !r.runs.begin(scope.RunID) {
+		return domain.NewError(domain.CodeRunIDConflict, "run id is already active or completed", domain.ErrInvalidInput)
+	}
+	releaseRun, err := r.acquireRun(ctx)
+	if err != nil {
+		r.runs.finish(scope.RunID)
+		return err
+	}
+	ledgerScope := &llmRunScope{
 		runID:             domain.ID(scope.RunID),
 		threadID:          domain.ID(scope.ThreadID),
 		userID:            scope.UserID,
 		agentName:         r.entrypoint.Name,
+		protocol:          scope.Protocol,
 		model:             r.config.Model,
 		graph:             r.config.GraphVersion,
 		contract:          r.config.ContractVersion,
@@ -331,23 +487,26 @@ func (r *Runtime) BeginAuditRun(ctx context.Context, sessionID string, scope Aud
 		definitionName:    r.definition.Metadata.Name,
 		definitionVersion: r.definition.Metadata.Version,
 		definitionDigest:  r.definition.Digest,
-		lastByModel:       make(map[string]llmCallRuntime),
-	})
-	if !started {
+		startedAt:         r.config.Now(),
+		releaseRun:        releaseRun,
+		activeCalls:       make(map[string]llmCallRuntime),
+	}
+	if !r.llm.begin(sessionID, ledgerScope) {
+		releaseRun()
+		r.runs.finish(scope.RunID)
 		return domain.NewError(domain.CodeAuditSessionActive, "an audit run is already active for this session", domain.ErrInvalidInput)
 	}
-	return r.config.AuditRecorder.Record(ctx, &audit.Event{
-		ID:            scope.RunID + ":started",
-		SchemaVersion: audit.SchemaV1,
-		Type:          audit.EventRunStarted,
-		OccurredAt:    r.config.Now(),
-		RootRunID:     domain.ID(scope.RunID),
-		RunID:         domain.ID(scope.RunID),
-		ThreadID:      domain.ID(scope.ThreadID),
-		UserID:        scope.UserID,
-		AgentName:     r.entrypoint.Name,
-		Status:        audit.StatusRunning,
-	})
+	event := r.externalRunEvent(ctx, ledgerScope, audit.EventRunStarted, audit.StatusRunning, nil)
+	event.OccurredAt = r.config.Now()
+	if err := r.recordAuditWithRetry(ctx, &event); err != nil {
+		r.runs.finish(scope.RunID)
+		_, _ = r.llm.end(sessionID, err)
+		_ = r.delegationAuditor.FailPending(ctx, ledgerScope, err)
+		_ = r.toolAuditor.FailPending(ctx, ledgerScope)
+		releaseRun()
+		return err
+	}
+	return nil
 }
 
 // EndAuditRun completes an externally driven audit lifecycle exactly once.
@@ -358,40 +517,94 @@ func (r *Runtime) EndAuditRun(ctx context.Context, sessionID string, runErr erro
 	}
 	scope, existed := r.llm.scope(sessionID)
 	_, ledgerErr := r.llm.end(sessionID, runtimeError(runErr))
+	var terminalErr error
 	if ledgerErr != nil {
-		return ledgerErr
+		if reconcileErr := r.llm.reconcile(scope, ledgerErr); reconcileErr == nil {
+			ledgerErr = nil
+		} else {
+			ledgerErr = reconcileErr
+		}
+	}
+	if ledgerErr != nil {
+		terminalErr = ledgerErr
 	}
 	if existed {
 		if auditErr := r.delegationAuditor.FailPending(ctx, scope, runErr); auditErr != nil {
-			return auditErr
+			if terminalErr == nil {
+				terminalErr = auditErr
+			}
 		}
-		if auditErr := r.toolAuditor.FailPending(ctx, scope, runErr); auditErr != nil {
-			return auditErr
+		if auditErr := r.toolAuditor.FailPending(ctx, scope); auditErr != nil {
+			if terminalErr == nil {
+				terminalErr = auditErr
+			}
 		}
 	}
 	if !existed {
 		return nil
 	}
+	defer func() {
+		if scope.releaseRun != nil {
+			scope.releaseRun()
+		}
+		r.runs.finish(string(scope.runID))
+	}()
+	if deleteErr := r.sessions.Delete(ctx, &session.DeleteRequest{
+		AppName:   r.config.AppName,
+		UserID:    scope.userID,
+		SessionID: sessionID,
+	}); deleteErr != nil && terminalErr == nil {
+		terminalErr = domain.NewError(domain.CodeRuntimeSessionCleanupFailed, "delete external ADK session", deleteErr)
+	}
+	cause := runErr
+	if cause == nil {
+		cause = terminalErr
+	}
 	eventType := audit.EventRunCompleted
 	status := audit.StatusSucceeded
-	if runErr != nil {
+	if cause != nil {
 		eventType = audit.EventRunFailed
 		status = audit.StatusFailed
 	}
-	event := audit.Event{
-		ID:            sessionID + ":" + string(eventType),
-		SchemaVersion: audit.SchemaV1,
-		Type:          eventType,
-		OccurredAt:    r.config.Now(),
-		RootRunID:     scope.runID,
-		RunID:         scope.runID,
-		ThreadID:      scope.threadID,
-		UserID:        scope.userID,
-		AgentName:     scope.agentName,
-		Status:        status,
+	event := r.externalRunEvent(ctx, scope, eventType, status, cause)
+	event.OccurredAt = r.config.Now()
+	if recordErr := r.recordAuditWithRetry(ctx, &event); recordErr != nil && terminalErr == nil {
+		terminalErr = recordErr
 	}
-	if runErr != nil {
-		runtimeErr := runtimeError(runErr)
+	return terminalErr
+}
+
+func (r *Runtime) externalRunEvent(
+	ctx context.Context,
+	scope *llmRunScope,
+	eventType audit.EventType,
+	status audit.Status,
+	cause error,
+) audit.Event {
+	event := audit.Event{
+		ID:                    string(scope.runID) + ":" + string(eventType),
+		SchemaVersion:         audit.SchemaV1,
+		Type:                  eventType,
+		RootRunID:             scope.runID,
+		RunID:                 scope.runID,
+		ThreadID:              scope.threadID,
+		UserID:                scope.userID,
+		Protocol:              scope.protocol,
+		AgentName:             r.entrypoint.Name,
+		AgentVersion:          r.entrypoint.Version,
+		AgentDefinitionDigest: r.entrypoint.Digest,
+		DefinitionName:        r.definition.Metadata.Name,
+		DefinitionVersion:     r.definition.Metadata.Version,
+		DefinitionDigest:      r.definition.Digest,
+		Model:                 r.config.Model,
+		Provider:              r.config.Provider,
+		Status:                status,
+		DurationMS:            r.config.Now().Sub(scope.startedAt).Milliseconds(),
+		TraceID:               traceIDFromContext(ctx),
+		SpanID:                spanIDFromContext(ctx),
+	}
+	if cause != nil {
+		runtimeErr := runtimeError(cause)
 		var domainErr *domain.Error
 		if errors.As(runtimeErr, &domainErr) {
 			event.ErrorCode = domainErr.Code
@@ -401,7 +614,7 @@ func (r *Runtime) EndAuditRun(ctx context.Context, sessionID string, runErr erro
 			event.ErrorMessage = runtimeErr.Error()
 		}
 	}
-	return r.config.AuditRecorder.Record(ctx, &event)
+	return event
 }
 
 // Run executes the shared ADK runtime and exposes native ADK events to a
@@ -410,8 +623,45 @@ func (r *Runtime) Run(
 	ctx context.Context,
 	request RunRequest,
 	observe func(*session.Event) error,
-) (RunResult, error) {
-	var runErr error
+) (result RunResult, runErr error) {
+	request.RunID = strings.TrimSpace(request.RunID)
+	request.ThreadID = strings.TrimSpace(request.ThreadID)
+	request.UserID = strings.TrimSpace(request.UserID)
+	request.Protocol = strings.TrimSpace(request.Protocol)
+	switch {
+	case request.RunID == "":
+		return RunResult{}, domain.NewError(domain.CodeRunIDRequired, "run id is required", domain.ErrInvalidInput)
+	case request.ThreadID == "":
+		return RunResult{}, domain.NewError(domain.CodeThreadIDRequired, "thread id is required", domain.ErrInvalidInput)
+	case request.UserID == "":
+		return RunResult{}, domain.NewError(domain.CodeUserIDRequired, "user id is required", domain.ErrInvalidInput)
+	case strings.TrimSpace(request.UserMessage) == "":
+		return RunResult{}, domain.NewError(domain.CodeUserMessageRequired, "user message is required", domain.ErrInvalidInput)
+	case !validProtocolIdentifier(request.RunID):
+		return RunResult{}, domain.NewError(domain.CodeRunIDInvalid, "run id must contain at most 128 printable bytes", domain.ErrInvalidInput)
+	case !validProtocolIdentifier(request.ThreadID):
+		return RunResult{}, domain.NewError(domain.CodeThreadIDInvalid, "thread id must contain at most 128 printable bytes", domain.ErrInvalidInput)
+	case !validProtocolIdentifier(request.UserID):
+		return RunResult{}, domain.NewError(domain.CodeUserIDInvalid, "user id must contain at most 128 printable bytes", domain.ErrInvalidInput)
+	case len(request.History) > MaxHistoryMessages:
+		return RunResult{}, domain.NewError(domain.CodeHistoryInvalid, fmt.Sprintf("conversation history exceeds %d messages", MaxHistoryMessages), domain.ErrInvalidInput)
+	}
+	if err := r.ensureDurableRunID(ctx, request.RunID); err != nil {
+		return RunResult{}, err
+	}
+	if !r.runs.begin(request.RunID) {
+		return RunResult{}, domain.NewError(domain.CodeRunIDConflict, "run id is already active or completed", domain.ErrInvalidInput)
+	}
+	releaseRun, err := r.acquireRun(ctx)
+	if err != nil {
+		r.runs.finish(request.RunID)
+		return RunResult{}, err
+	}
+	defer func() {
+		releaseRun()
+		r.runs.finish(request.RunID)
+	}()
+
 	ctx, runSpan := r.tracer.Start(
 		ctx,
 		"agent.run "+r.entrypoint.Name,
@@ -442,6 +692,7 @@ func (r *Runtime) Run(
 		threadID:          domain.ID(request.ThreadID),
 		userID:            request.UserID,
 		agentName:         r.entrypoint.Name,
+		protocol:          request.Protocol,
 		model:             r.config.Model,
 		graph:             r.config.GraphVersion,
 		contract:          r.config.ContractVersion,
@@ -449,22 +700,54 @@ func (r *Runtime) Run(
 		definitionName:    r.definition.Metadata.Name,
 		definitionVersion: r.definition.Metadata.Version,
 		definitionDigest:  r.definition.Digest,
-		lastByModel:       make(map[string]llmCallRuntime),
+		startedAt:         startedAt,
+		activeCalls:       make(map[string]llmCallRuntime),
 	}
-	r.llm.begin(sessionID, scope)
+	if !r.llm.begin(sessionID, scope) {
+		runErr = domain.NewError(domain.CodeAuditSessionActive, "an audit run is already active for this session", domain.ErrInvalidInput)
+		return RunResult{}, runErr
+	}
 	if auditErr := r.recordRunAudit(ctx, request, audit.EventRunStarted, audit.StatusRunning, startedAt, nil); auditErr != nil {
-		return RunResult{}, auditErr
+		runErr = auditErr
+		auditScope, _ := r.llm.scope(sessionID)
+		_, _ = r.llm.end(sessionID, runErr)
+		_ = r.delegationAuditor.FailPending(context.WithoutCancel(ctx), auditScope, runErr)
+		_ = r.toolAuditor.FailPending(context.WithoutCancel(ctx), auditScope)
+		_ = r.sessions.Delete(context.WithoutCancel(ctx), &session.DeleteRequest{
+			AppName:   r.config.AppName,
+			UserID:    request.UserID,
+			SessionID: sessionID,
+		})
+		return RunResult{}, runErr
 	}
 	defer func() {
 		// Capture the run scope before the LLM ledger removes it so pending
 		// delegation/tool auditors can still emit terminal evidence.
 		auditScope, _ := r.llm.scope(sessionID)
-		_, _ = r.llm.end(sessionID, runErr)
+		_, ledgerErr := r.llm.end(sessionID, runErr)
+		if ledgerErr != nil {
+			if reconcileErr := r.llm.reconcile(auditScope, ledgerErr); reconcileErr == nil {
+				ledgerErr = nil
+			} else {
+				ledgerErr = reconcileErr
+			}
+		}
+		if ledgerErr != nil && runErr == nil {
+			runErr = ledgerErr
+		}
 		if delegationAuditErr := r.delegationAuditor.FailPending(context.WithoutCancel(ctx), auditScope, runErr); delegationAuditErr != nil && runErr == nil {
 			runErr = delegationAuditErr
 		}
-		if toolAuditErr := r.toolAuditor.FailPending(context.WithoutCancel(ctx), auditScope, runErr); toolAuditErr != nil && runErr == nil {
+		if toolAuditErr := r.toolAuditor.FailPending(context.WithoutCancel(ctx), auditScope); toolAuditErr != nil && runErr == nil {
 			runErr = toolAuditErr
+		}
+		auditCtx := context.WithoutCancel(ctx)
+		if deleteErr := r.sessions.Delete(auditCtx, &session.DeleteRequest{
+			AppName:   r.config.AppName,
+			UserID:    request.UserID,
+			SessionID: sessionID,
+		}); deleteErr != nil && runErr == nil {
+			runErr = domain.NewError(domain.CodeRuntimeSessionCleanupFailed, "delete run-scoped ADK session", deleteErr)
 		}
 		eventType := audit.EventRunCompleted
 		status := audit.StatusSucceeded
@@ -474,9 +757,13 @@ func (r *Runtime) Run(
 			status = audit.StatusFailed
 			auditFailure = runErr
 		}
-		auditCtx := context.WithoutCancel(ctx)
 		if auditErr := r.recordRunAudit(auditCtx, request, eventType, status, startedAt, auditFailure); auditErr != nil && runErr == nil {
 			runErr = auditErr
+		}
+		if runErr != nil {
+			runtimeErr := runtimeError(runErr)
+			runSpan.RecordError(runtimeErr)
+			runSpan.SetStatus(codes.Error, runtimeErr.Error())
 		}
 	}()
 	r.config.Logger.InfoContext(ctx, "agent_run_started",
@@ -500,7 +787,7 @@ func (r *Runtime) Run(
 			runSpan.SetStatus(codes.Error, runtimeError(err).Error())
 			r.config.Logger.WarnContext(ctx, "agent_run_failed",
 				append(traceLogFields(ctx),
-					"run_id", request.RunID, "error", err,
+					"run_id", request.RunID, "error", runtimeError(err).Error(),
 				)...)
 			runErr = runtimeError(err)
 			return RunResult{}, runErr
@@ -547,6 +834,21 @@ func (r *Runtime) Run(
 	}, nil
 }
 
+func (r *Runtime) ensureDurableRunID(ctx context.Context, runID string) error {
+	checker, ok := r.config.AuditRecorder.(audit.RunExistenceChecker)
+	if !ok {
+		return nil
+	}
+	exists, err := checker.RunExists(ctx, domain.ID(runID))
+	if err != nil {
+		return err
+	}
+	if exists {
+		return domain.NewError(domain.CodeRunIDConflict, "run id is already active or completed", domain.ErrInvalidInput)
+	}
+	return nil
+}
+
 func (r *Runtime) recordRunAudit(
 	ctx context.Context,
 	request RunRequest,
@@ -556,24 +858,27 @@ func (r *Runtime) recordRunAudit(
 	cause error,
 ) error {
 	event := audit.Event{
-		TraceID:           traceIDFromContext(ctx),
-		SpanID:            spanIDFromContext(ctx),
-		DefinitionName:    r.definition.Metadata.Name,
-		DefinitionVersion: r.definition.Metadata.Version,
-		DefinitionDigest:  r.definition.Digest,
-		ID:                request.RunID + ":" + string(eventType),
-		SchemaVersion:     audit.SchemaV1,
-		Type:              eventType,
-		OccurredAt:        r.config.Now(),
-		RootRunID:         domain.ID(request.RunID),
-		RunID:             domain.ID(request.RunID),
-		ThreadID:          domain.ID(request.ThreadID),
-		UserID:            request.UserID,
-		AgentName:         r.entrypoint.Name,
-		Model:             r.config.Model,
-		Provider:          r.config.Provider,
-		Status:            status,
-		DurationMS:        r.config.Now().Sub(startedAt).Milliseconds(),
+		TraceID:               traceIDFromContext(ctx),
+		SpanID:                spanIDFromContext(ctx),
+		DefinitionName:        r.definition.Metadata.Name,
+		DefinitionVersion:     r.definition.Metadata.Version,
+		DefinitionDigest:      r.definition.Digest,
+		ID:                    request.RunID + ":" + string(eventType),
+		SchemaVersion:         audit.SchemaV1,
+		Type:                  eventType,
+		OccurredAt:            r.config.Now(),
+		RootRunID:             domain.ID(request.RunID),
+		RunID:                 domain.ID(request.RunID),
+		ThreadID:              domain.ID(request.ThreadID),
+		UserID:                request.UserID,
+		Protocol:              request.Protocol,
+		AgentName:             r.entrypoint.Name,
+		AgentVersion:          r.entrypoint.Version,
+		AgentDefinitionDigest: r.entrypoint.Digest,
+		Model:                 r.config.Model,
+		Provider:              r.config.Provider,
+		Status:                status,
+		DurationMS:            r.config.Now().Sub(startedAt).Milliseconds(),
 	}
 	if cause != nil {
 		runtimeErr := runtimeError(cause)
@@ -589,7 +894,16 @@ func (r *Runtime) recordRunAudit(
 	if err := event.Validate(); err != nil {
 		return err
 	}
-	return r.config.AuditRecorder.Record(ctx, &event)
+	return r.recordAuditWithRetry(ctx, &event)
+}
+
+func (r *Runtime) recordAuditWithRetry(ctx context.Context, event *audit.Event) error {
+	if err := r.config.AuditRecorder.Record(ctx, event); err != nil {
+		// SQLite busy and transient exporter failures are the common case. A
+		// second append attempt cannot overwrite the append-only event ID.
+		return r.config.AuditRecorder.Record(ctx, event)
+	}
+	return nil
 }
 
 // loadStructuredAnalysis consumes the parsed model output from ADK session
@@ -603,13 +917,13 @@ func (r *Runtime) loadStructuredAnalysis(ctx context.Context, request RunRequest
 	})
 	if err != nil {
 		r.config.Logger.Warn("agent_session_state_unavailable",
-			"run_id", request.RunID, "error", err)
+			"run_id", request.RunID, "error", runtimeError(err).Error())
 		return domain.NewError(domain.CodeRuntimeSessionUnavailable, "read ADK session state", err)
 	}
 	if response == nil || response.Session == nil {
 		return nil
 	}
-	value, err := response.Session.State().Get(structuredOutputStateKey)
+	value, err := response.Session.State().Get(StructuredOutputStateKey(r.entrypoint.Name))
 	if err != nil {
 		return nil
 	}
@@ -618,13 +932,30 @@ func (r *Runtime) loadStructuredAnalysis(ctx context.Context, request RunRequest
 
 // Entrypoint exposes the selected AgentDefinition to protocol adapters.
 func (r *Runtime) Entrypoint() *AgentDefinition {
-	return r.entrypoint
+	clone := cloneAgentDefinition(r.entrypoint)
+	return &clone
 }
 
 // Deployment exposes non-secret deployment metadata for standard protocol
 // discovery. Instructions and schemas remain internal to the runtime.
 func (r *Runtime) Deployment() *Deployment {
-	return r.definition
+	deployment := *r.definition
+	deployment.Spec.MCPServers = append([]MCPServerDefinition(nil), r.definition.Spec.MCPServers...)
+	deployment.Spec.Agents = make([]AgentDefinition, len(r.definition.Spec.Agents))
+	for index := range r.definition.Spec.Agents {
+		deployment.Spec.Agents[index] = cloneAgentDefinition(&r.definition.Spec.Agents[index])
+	}
+	return &deployment
+}
+
+func cloneAgentDefinition(definition *AgentDefinition) AgentDefinition {
+	clone := *definition
+	clone.SubAgents = append([]AgentReference(nil), definition.SubAgents...)
+	clone.Tools.Allow = make(map[string][]string, len(definition.Tools.Allow))
+	for server, tools := range definition.Tools.Allow {
+		clone.Tools.Allow[server] = append([]string(nil), tools...)
+	}
+	return clone
 }
 
 func traceLogFields(ctx context.Context) []any {
@@ -633,6 +964,10 @@ func traceLogFields(ctx context.Context) []any {
 		return nil
 	}
 	return []any{"trace_id", spanContext.TraceID().String(), "span_id", spanContext.SpanID().String()}
+}
+
+func validProtocolIdentifier(value string) bool {
+	return ValidIdentifier(value)
 }
 
 func traceIDFromContext(ctx context.Context) string {

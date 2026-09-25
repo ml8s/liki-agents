@@ -112,12 +112,21 @@ func TestAGUIRequiresVerifiedIdentity(t *testing.T) {
 
 func TestOperationalEndpoints(t *testing.T) {
 	handler := newServer(t, "secret")
-	for _, path := range []string{"/healthz", "/readyz", "/version"} {
+	for _, path := range []string{"/readyz", "/version"} {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 		if response.Code != http.StatusOK {
 			t.Fatalf("%s status = %d", path, response.Code)
 		}
+	}
+}
+
+func TestHealthzIsRetired(t *testing.T) {
+	handler := newServer(t, "")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("healthz status = %d, want %d", response.Code, http.StatusNotFound)
 	}
 }
 
@@ -143,6 +152,41 @@ func TestA2ABodySizeLimit(t *testing.T) {
 	}
 }
 
+func TestAuthenticationRunsBeforeRequestBodyIsConsumed(t *testing.T) {
+	read := false
+	handler := mustNewServer(t, transport.Services{
+		AgentCard: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
+		A2A: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			read = true
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.WriteHeader(http.StatusAccepted)
+		}),
+		AGUI:          http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }),
+		InternalToken: "secret",
+	})
+	request := httptest.NewRequest(http.MethodPost, "/a2a", strings.NewReader(strings.Repeat("x", 2<<20+1)))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated oversized status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+	if read {
+		t.Fatal("protocol handler read an unauthenticated request body")
+	}
+}
+
+func TestAGUIRejectsOversizedIdentityHeader(t *testing.T) {
+	handler := newServer(t, "")
+	request := httptest.NewRequest(http.MethodPost, "/ag-ui", strings.NewReader(`{}`))
+	request.Header.Set("X-Liki-User-ID", strings.Repeat("u", 129))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("oversized identity status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestReadyzDoesNotLeakDependencyDetail(t *testing.T) {
 	unhealthy := &unhealthyChecker{name: "engine_mcp", detail: "dial tcp 10.0.0.1:18081: connection refused"}
 	handler := mustNewServer(t, transport.Services{
@@ -165,9 +209,57 @@ func TestReadyzDoesNotLeakDependencyDetail(t *testing.T) {
 	}
 }
 
+func TestReadyzChecksEveryDependency(t *testing.T) {
+	handler := mustNewServer(t, transport.Services{
+		AgentCard: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
+		A2A:       http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }),
+		AGUI:      http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }),
+		HealthChecks: []platform.HealthChecker{
+			&unhealthyChecker{name: "first", detail: "first failure"},
+			healthy{},
+			&unhealthyChecker{name: "second", detail: "second failure"},
+		},
+	})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", response.Code)
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, "first") || !strings.Contains(body, "second") {
+		t.Fatalf("readyz omitted a failed dependency: %s", body)
+	}
+	if strings.Contains(body, "first failure") || strings.Contains(body, "second failure") {
+		t.Fatalf("readyz leaks dependency detail: %s", body)
+	}
+}
+
+func TestReadyzDoesNotInheritClientCancellation(t *testing.T) {
+	handler := mustNewServer(t, transport.Services{
+		AgentCard:    http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
+		A2A:          http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }),
+		AGUI:         http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }),
+		HealthChecks: []platform.HealthChecker{contextAwareChecker{}},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil).WithContext(ctx))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("canceled readiness status = %d, want %d", response.Code, http.StatusOK)
+	}
+}
+
 type unhealthyChecker struct {
 	name   string
 	detail string
+}
+
+type contextAwareChecker struct{}
+
+func (contextAwareChecker) CheckHealth(ctx context.Context) platform.DependencyHealth {
+	return platform.DependencyHealth{Name: "context", OK: ctx.Err() == nil}
 }
 
 func (c *unhealthyChecker) CheckHealth(context.Context) platform.DependencyHealth {

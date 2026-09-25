@@ -7,12 +7,3 @@ const (
 	StructuredOutputJSONSchema = "json_schema"
 	StructuredOutputJSONObject = "json_object"
 )
-
-func validStructuredOutputMode(mode string) bool {
-	switch mode {
-	case StructuredOutputNone, StructuredOutputJSONSchema, StructuredOutputJSONObject:
-		return true
-	default:
-		return false
-	}
-}

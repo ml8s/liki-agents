@@ -10,17 +10,22 @@ import (
 
 	"github.com/ml8s/liki-agents/internal/agent"
 	"github.com/ml8s/liki-agents/internal/protocol/agui"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/genai"
 )
 
 type subagentEvent struct {
 	Type          string `json:"type"`
 	SubagentRunID string `json:"subagentRunId,omitempty"`
+	MessageID     string `json:"messageId,omitempty"`
 	Name          string `json:"name,omitempty"`
 	ParentRunID   string `json:"parentSubagentRunId,omitempty"`
 	Message       string `json:"message,omitempty"`
 	Code          string `json:"code,omitempty"`
 	Delta         string `json:"delta,omitempty"`
+	ToolCallID    string `json:"toolCallId,omitempty"`
+	ToolCallName  string `json:"toolCallName,omitempty"`
 }
 
 func sseEvents(t *testing.T, body string) []subagentEvent {
@@ -40,6 +45,90 @@ func sseEvents(t *testing.T, body string) []subagentEvent {
 	return events
 }
 
+func TestAGUIAttributesWorkerTextAndToolsToSubagent(t *testing.T) {
+	events := []*session.Event{
+		{
+			Author: "worker",
+			Branch: "main.worker",
+			LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{
+				{Text: "worker answer"},
+				{FunctionCall: &genai.FunctionCall{ID: "call_worker", Name: "test_tool"}},
+			}}},
+		},
+		{
+			Author: "worker",
+			Branch: "main.worker",
+			LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "call_worker", Name: "test_tool", Response: map[string]any{"ok": true}}},
+			}}},
+		},
+		{Author: "main", Branch: "main"},
+	}
+	scripted := &scriptedRuntime{
+		events: events,
+		result: agent.RunResult{Text: "root answer"},
+	}
+	handler, err := agui.New(scripted, agui.Config{RunTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := authenticatedRequest(t, `{"threadId":"t","runId":"r","messages":[{"id":"m","role":"user","content":"hi"}]}`)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	got := sseEvents(t, response.Body.String())
+	var workerText, rootText, toolStart, toolArgs, toolResult, toolEnd []subagentEvent
+	for _, event := range got {
+		switch event.Type {
+		case "TEXT_MESSAGE_CONTENT":
+			if event.SubagentRunID != "" {
+				workerText = append(workerText, event)
+			} else {
+				rootText = append(rootText, event)
+			}
+		case "TOOL_CALL_START":
+			toolStart = append(toolStart, event)
+		case "TOOL_CALL_ARGS":
+			toolArgs = append(toolArgs, event)
+		case "TOOL_CALL_RESULT":
+			toolResult = append(toolResult, event)
+		case "TOOL_CALL_END":
+			toolEnd = append(toolEnd, event)
+		}
+	}
+	if len(workerText) != 1 || workerText[0].Delta != "worker answer" || workerText[0].SubagentRunID == "" {
+		t.Fatalf("worker text = %#v", workerText)
+	}
+	if len(rootText) != 1 || rootText[0].Delta != "root answer" || rootText[0].SubagentRunID != "" {
+		t.Fatalf("root text = %#v", rootText)
+	}
+	for _, group := range [][]subagentEvent{toolStart, toolArgs, toolResult, toolEnd} {
+		if len(group) != 1 || group[0].SubagentRunID != workerText[0].SubagentRunID {
+			t.Fatalf("tool attribution = %#v; worker=%q", group, workerText[0].SubagentRunID)
+		}
+	}
+}
+
+func TestAGUIDoesNotTreatEntrypointAsSubagent(t *testing.T) {
+	scripted := &scriptedRuntime{
+		events: []*session.Event{{Author: "main", Branch: "main"}},
+		result: agent.RunResult{Text: "root answer"},
+	}
+	handler, err := agui.New(scripted, agui.Config{RunTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := authenticatedRequest(t, `{"threadId":"t","runId":"r","messages":[{"id":"m","role":"user","content":"hi"}]}`)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	for _, event := range sseEvents(t, response.Body.String()) {
+		if event.Type == "SUBAGENT_STARTED" || event.Type == "SUBAGENT_FINISHED" {
+			t.Fatalf("entrypoint emitted subagent lifecycle: %#v", event)
+		}
+	}
+}
+
 func TestAGUIEmitsOfficialSubagentLifecycle(t *testing.T) {
 	events := []*session.Event{
 		{Author: "planner", Branch: "main.planner"},
@@ -54,7 +143,6 @@ func TestAGUIEmitsOfficialSubagentLifecycle(t *testing.T) {
 	}
 	handler, err := agui.New(scripted, agui.Config{
 		RunTimeout: time.Second,
-		Entrypoint: "main",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +208,6 @@ func TestAGUIEmitsSubagentErrorBeforeRunError(t *testing.T) {
 	}
 	handler, err := agui.New(scripted, agui.Config{
 		RunTimeout: time.Second,
-		Entrypoint: "main",
 	})
 	if err != nil {
 		t.Fatal(err)

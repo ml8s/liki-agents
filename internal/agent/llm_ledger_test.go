@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -63,6 +64,20 @@ type stubAuditRecorder struct {
 	events []audit.Event
 }
 
+type failOnceStubAudit struct {
+	stubAuditRecorder
+	eventType audit.EventType
+	failed    bool
+}
+
+func (r *failOnceStubAudit) Record(ctx context.Context, event *audit.Event) error {
+	if event != nil && event.Type == r.eventType && !r.failed {
+		r.failed = true
+		return errors.New("temporary audit store failure")
+	}
+	return r.stubAuditRecorder.Record(ctx, event)
+}
+
 func (r *stubAuditRecorder) Record(_ context.Context, event *audit.Event) error {
 	if event == nil {
 		return nil
@@ -99,6 +114,10 @@ func newTestLedger() (*llmLedger, *stubAuditRecorder) {
 	return ledger, recorder
 }
 
+func fixedLedgerNow() time.Time {
+	return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
+}
+
 func newTestScope() *llmRunScope {
 	return &llmRunScope{
 		runID:             "run_1",
@@ -112,7 +131,7 @@ func newTestScope() *llmRunScope {
 		definitionName:    "test-definition",
 		definitionVersion: "1.0.0",
 		definitionDigest:  "sha256:test",
-		lastByModel:       make(map[string]llmCallRuntime),
+		activeCalls:       make(map[string]llmCallRuntime),
 	}
 }
 
@@ -147,6 +166,41 @@ func TestLedgerLifecycleCompletesNormally(t *testing.T) {
 	ledger.end("session_1", nil)
 	if got := len(recorder.eventsOfType(audit.EventLLMCallFailed)); got != 0 {
 		t.Fatalf("failed events after clean end = %d, want 0", got)
+	}
+}
+
+func TestLedgerRetainsActiveCallWhenTerminalAuditWriteFails(t *testing.T) {
+	recorder := &failOnceStubAudit{eventType: audit.EventLLMCallCompleted}
+	ledger := newLLMLedger(recorder, nil, "test", NewTestDeployment(t), fixedLedgerNow)
+	scope := newTestScope()
+	if !ledger.begin("session_1", scope) {
+		t.Fatal("begin() returned false")
+	}
+	ctx := testCtx()
+	if _, err := ledger.beforeModel(ctx, &model.LLMRequest{Model: "test-model"}); err != nil {
+		t.Fatalf("beforeModel() error = %v", err)
+	}
+	auditErr := errors.New("terminal audit unavailable")
+	if _, err := ledger.afterModel(ctx, &model.LLMResponse{}, nil); err == nil {
+		t.Fatal("afterModel() unexpectedly survived terminal audit failure")
+	}
+	scope.mu.Lock()
+	active := len(scope.activeCalls)
+	scope.mu.Unlock()
+	if active != 1 {
+		t.Fatalf("active calls after terminal audit failure = %d, want 1", active)
+	}
+	if err := ledger.reconcile(scope, auditErr); err != nil {
+		t.Fatalf("reconcile() error = %v", err)
+	}
+	scope.mu.Lock()
+	active = len(scope.activeCalls)
+	scope.mu.Unlock()
+	if active != 0 {
+		t.Fatalf("active calls after reconciliation = %d, want 0", active)
+	}
+	if got := len(recorder.eventsOfType(audit.EventLLMCallFailed)); got != 1 {
+		t.Fatalf("terminal failed events = %d, want 1", got)
 	}
 }
 
@@ -212,16 +266,19 @@ func TestLedgerConcurrentCallbacksDoNotRace(t *testing.T) {
 	ledger, recorder := newTestLedger()
 	scope := newTestScope()
 	ledger.begin("session_1", scope)
-	ctx := testCtx()
 
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			modelName := fmt.Sprintf("model-%d", i)
-			_, _ = ledger.beforeModel(ctx, &model.LLMRequest{Model: modelName})
-			_, _ = ledger.afterModel(ctx, &model.LLMResponse{ModelVersion: modelName}, nil)
+			invocationCtx := &fakeAgentContext{
+				sessionID:    "session_1",
+				invocationID: fmt.Sprintf("inv_%d", i),
+				agentName:    "coordinator",
+			}
+			_, _ = ledger.beforeModel(invocationCtx, &model.LLMRequest{Model: "test-model"})
+			_, _ = ledger.afterModel(invocationCtx, &model.LLMResponse{ModelVersion: "test-model"}, nil)
 		}()
 	}
 	wg.Wait()
@@ -231,5 +288,43 @@ func TestLedgerConcurrentCallbacksDoNotRace(t *testing.T) {
 	}
 	if got := len(recorder.events); got != 100 {
 		t.Fatalf("audit events = %d, want 100 started/completed-or-failed facts", got)
+	}
+}
+
+func TestLedgerUsesInvokingAgentPromptProvenance(t *testing.T) {
+	deployment := NewTestDeployment(t)
+	root := deployment.Spec.Agents[0]
+	root.SubAgents = []AgentReference{{Name: "worker"}}
+	worker := root
+	worker.Name = "worker"
+	worker.InstructionDigest = "sha256:worker-instruction"
+	worker.SubAgents = nil
+	deployment.Spec.Agents = append(deployment.Spec.Agents, worker)
+
+	events := &stubAuditRecorder{}
+	ledger := newLLMLedger(events, nil, "test-provider", deployment, fixedLedgerNow)
+	scope := newTestScope()
+	ledger.begin("session_worker", scope)
+	ctx := &fakeAgentContext{
+		sessionID:    "session_worker",
+		invocationID: "inv_worker",
+		agentName:    "worker",
+	}
+	if _, err := ledger.beforeModel(ctx, &model.LLMRequest{Model: "test-model"}); err != nil {
+		t.Fatalf("beforeModel() error = %v", err)
+	}
+	started := events.eventsOfType(audit.EventLLMCallStarted)
+	if len(started) != 1 {
+		t.Fatalf("started events = %d, want 1", len(started))
+	}
+	expectedDigest := deployment.Spec.Agents[len(deployment.Spec.Agents)-1].Digest
+	if started[0].AgentName != "worker" || started[0].AgentDefinitionDigest != expectedDigest {
+		t.Fatalf("worker provenance = %#v", started[0])
+	}
+	if got := started[0].Payload["prompt_version"]; got != "sha256:worker-instruction" {
+		t.Fatalf("prompt_version = %#v, want worker instruction digest", got)
+	}
+	if started[0].DefinitionName == "" || started[0].DefinitionDigest == "" {
+		t.Fatalf("LLM audit lacks deployment provenance: %#v", started[0])
 	}
 }

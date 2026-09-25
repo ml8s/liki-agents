@@ -12,6 +12,7 @@ import (
 
 func Deployment(t *testing.T) *agent.Deployment {
 	t.Helper()
+	t.Setenv("TEST_MCP_ENDPOINT", "in-memory://test")
 	root := t.TempDir()
 	files := map[string]string{
 		"agent-deployment.json": `{
@@ -19,6 +20,7 @@ func Deployment(t *testing.T) *agent.Deployment {
 			"kind": "AgentDeployment",
 			"metadata": {"name": "adapter-agent", "version": "1.0.0"},
 			"spec": {
+				"mcpServers": [{"name": "test", "endpointEnv": "TEST_MCP_ENDPOINT"}],
 				"agents": [{
 					"name": "main",
 					"version": "1.0.0",
@@ -30,7 +32,7 @@ func Deployment(t *testing.T) *agent.Deployment {
 						"schema": {"path": "output.schema.json"},
 						"textPointer": "/answer"
 					},
-					"tools": {"allow": ["test_tool"]}
+					"tools": {"allow": {"test": ["test_tool"]}}
 									}]
 			}
 		}`,

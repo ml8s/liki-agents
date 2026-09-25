@@ -24,6 +24,7 @@ type ToolExecutionRecord struct {
 	UserID       string
 	AgentName    string
 	AgentVersion string
+	MCPServer    string
 	Status       audit.Status
 	StartedAt    time.Time
 	FinishedAt   time.Time
@@ -77,7 +78,8 @@ func newToolExecutionAuditor(
 	}
 }
 
-// BeforeTool records the started fact and does not alter tool arguments.
+// BeforeTool records the started fact. Returning nil tells ADK to continue
+// normal tool execution; returning args would replace the tool with its input.
 func (a *ToolExecutionAuditor) BeforeTool(
 	ctx adkagent.Context,
 	tool tool.Tool,
@@ -100,7 +102,7 @@ func (a *ToolExecutionAuditor) BeforeTool(
 		a.mu.Unlock()
 		return args, auditErr
 	}
-	return args, nil
+	return nil, nil
 }
 
 // AfterTool records the terminal fact and preserves ADK's result and error.
@@ -117,9 +119,6 @@ func (a *ToolExecutionAuditor) AfterTool(
 	key := a.pendingKey(ctx, ctx.FunctionCallID())
 	a.mu.Lock()
 	record, ok := a.pending[key]
-	if ok {
-		delete(a.pending, key)
-	}
 	a.mu.Unlock()
 	if !ok {
 		return result, domain.NewError(domain.CodeToolCallUnknown, "tool completion has no matching started audit", fmt.Errorf("tool %q call id %q", tool.Name(), ctx.FunctionCallID()))
@@ -137,7 +136,7 @@ func (a *ToolExecutionAuditor) AfterTool(
 	if err != nil {
 		record.Status = audit.StatusFailed
 		record.ErrorCode = domain.CodeToolExecutionFailed
-		record.ErrorMessage = err.Error()
+		record.ErrorMessage = "MCP tool execution failed"
 	} else {
 		record.Status = audit.StatusSucceeded
 	}
@@ -146,8 +145,15 @@ func (a *ToolExecutionAuditor) AfterTool(
 		eventType = audit.EventToolCallFailed
 	}
 	if auditErr := a.record(ctx, record, eventType); auditErr != nil {
+		// Keep the started invocation pending so Runtime.Run's terminal
+		// reconciliation can emit a terminal event after a transient failure.
 		return result, auditErr
 	}
+	a.mu.Lock()
+	// Another callback cannot legitimately complete this call ID first; delete
+	// only after its terminal evidence has been accepted.
+	delete(a.pending, key)
+	a.mu.Unlock()
 	if a.metrics != nil {
 		a.metrics.ObserveToolCall(record.AgentName, record.Tool, string(record.Status), time.Duration(record.DurationMS)*time.Millisecond)
 	}
@@ -159,7 +165,6 @@ func (a *ToolExecutionAuditor) AfterTool(
 func (a *ToolExecutionAuditor) FailPending(
 	ctx context.Context,
 	scope *llmRunScope,
-	cause error,
 ) error {
 	a.mu.Lock()
 	var pending map[string]ToolExecutionRecord
@@ -184,9 +189,6 @@ func (a *ToolExecutionAuditor) FailPending(
 		record.Status = audit.StatusFailed
 		record.ErrorCode = domain.CodeToolExecutionInterrupted
 		record.ErrorMessage = "tool execution interrupted by run end"
-		if cause != nil {
-			record.ErrorMessage = cause.Error()
-		}
 		if auditErr := a.recordWithScope(ctx, scope, record, audit.EventToolCallFailed); auditErr != nil && firstErr == nil {
 			firstErr = auditErr
 		}
@@ -216,6 +218,10 @@ func (a *ToolExecutionAuditor) startedRecord(
 	if !ok {
 		return ToolExecutionRecord{}, domain.NewError(domain.CodeAgentDefinitionInvalid, fmt.Sprintf("tool execution agent %q is not deployed", ctx.AgentName()), nil)
 	}
+	reference, allowed := definition.ToolReferenceFor(tool.Name())
+	if !allowed {
+		return ToolExecutionRecord{}, domain.NewError(domain.CodeToolCallInvalid, fmt.Sprintf("tool %q is not allowlisted for agent %q", tool.Name(), ctx.AgentName()), nil)
+	}
 	inputDigest, inputBytes, err := audit.CanonicalDigest(args)
 	if err != nil {
 		return ToolExecutionRecord{}, domain.NewError(domain.CodeToolProvenanceInvalid, "digest tool input", err)
@@ -228,6 +234,7 @@ func (a *ToolExecutionAuditor) startedRecord(
 	record.Tool = tool.Name()
 	record.AgentName = ctx.AgentName()
 	record.AgentVersion = definition.Version
+	record.MCPServer = reference.Server
 	record.Status = audit.StatusRunning
 	record.StartedAt = a.now()
 	record.InputDigest = inputDigest
@@ -264,6 +271,7 @@ func (a *ToolExecutionAuditor) record(
 		RunID:                 scope.runID,
 		ThreadID:              scope.threadID,
 		UserID:                scope.userID,
+		Protocol:              scope.protocol,
 		AgentName:             record.AgentName,
 		AgentVersion:          record.AgentVersion,
 		AgentDefinitionDigest: definition.Digest,
@@ -281,6 +289,7 @@ func (a *ToolExecutionAuditor) record(
 		ErrorCode:             record.ErrorCode,
 		ErrorMessage:          record.ErrorMessage,
 		Payload: map[string]any{
+			"mcp_server":    record.MCPServer,
 			"input_digest":  record.InputDigest,
 			"input_bytes":   record.InputBytes,
 			"output_digest": record.OutputDigest,
@@ -319,6 +328,7 @@ func (a *ToolExecutionAuditor) recordWithScope(
 		RunID:                 scope.runID,
 		ThreadID:              scope.threadID,
 		UserID:                scope.userID,
+		Protocol:              scope.protocol,
 		AgentName:             record.AgentName,
 		AgentVersion:          record.AgentVersion,
 		AgentDefinitionDigest: definition.Digest,
@@ -334,6 +344,7 @@ func (a *ToolExecutionAuditor) recordWithScope(
 		ErrorCode:             record.ErrorCode,
 		ErrorMessage:          record.ErrorMessage,
 		Payload: map[string]any{
+			"mcp_server":    record.MCPServer,
 			"input_digest":  record.InputDigest,
 			"input_bytes":   record.InputBytes,
 			"output_digest": record.OutputDigest,

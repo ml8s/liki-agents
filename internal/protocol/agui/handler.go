@@ -26,7 +26,6 @@ import (
 type Config struct {
 	RunTimeout time.Duration
 	Metrics    observability.ProtocolMetrics
-	Entrypoint string
 }
 
 // Handler is the AG-UI protocol adapter.
@@ -41,6 +40,7 @@ type Handler struct {
 // runtime is the single ADK runtime contract consumed by this protocol adapter.
 type runtime interface {
 	Run(ctx context.Context, request agent.RunRequest, observe func(*session.Event) error) (agent.RunResult, error)
+	Entrypoint() *agent.AgentDefinition
 }
 
 // New creates the standard AG-UI HTTP handler.
@@ -51,11 +51,15 @@ func New(runtime runtime, config Config) (*Handler, error) {
 	if config.RunTimeout <= 0 {
 		config.RunTimeout = 10 * time.Minute
 	}
+	entrypoint := runtime.Entrypoint()
+	if entrypoint == nil || entrypoint.Name == "" {
+		return nil, fmt.Errorf("runtime entrypoint is required")
+	}
 	return &Handler{
 		runtime:    runtime,
 		runTimeout: config.RunTimeout,
 		metrics:    config.Metrics,
-		entrypoint: config.Entrypoint,
+		entrypoint: entrypoint.Name,
 		writer:     aguisse.NewSSEWriter(),
 	}, nil
 }
@@ -82,6 +86,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		runID = aguievents.GenerateRunID()
 	}
 	caller, _ := identity.UserIDFromContext(r.Context())
+	if !agent.ValidIdentifier(threadID) || !agent.ValidIdentifier(runID) {
+		writeProtocolError(w, http.StatusUnprocessableEntity, domain.CodeInvalidAGUIMessage, "thread and run identifiers must contain at most 128 printable bytes")
+		return
+	}
 	if err := validateTextChatProfile(input); err != nil {
 		writeProtocolError(w, http.StatusUnprocessableEntity, domain.CodeUnsupportedAGUIFeature, err.Error())
 		return
@@ -89,6 +97,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	content, history, err := lastUserConversation(input.Messages)
 	if err != nil {
 		writeProtocolError(w, http.StatusUnprocessableEntity, domain.CodeInvalidAGUIMessage, err.Error())
+		return
+	}
+	if len(input.Messages) > agent.MaxHistoryMessages+1 {
+		writeProtocolError(w, http.StatusUnprocessableEntity, domain.CodeInvalidAGUIMessage, fmt.Sprintf("AG-UI request exceeds %d history messages", agent.MaxHistoryMessages))
 		return
 	}
 
@@ -120,6 +132,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		RunID:       runID,
 		ThreadID:    threadID,
 		UserID:      caller,
+		Protocol:    "ag_ui",
 		UserMessage: content,
 		History:     history,
 		Context:     opaqueJSON(input.ForwardedProps),
@@ -144,25 +157,42 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"definition": result.Definition,
 			"output":     json.RawMessage(result.Output),
 		}
-		runErr = emit(finished)
+		if err := streamer.emitRunFinished(finished, emit); err != nil {
+			runErr = err
+		}
 	}
-	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+	if runErr != nil && !errors.Is(runErr, context.Canceled) && !streamer.runFinished {
 		message, code := publicError(runErr)
 		_ = emit(aguievents.NewRunErrorEvent(message, aguievents.WithErrorCode(code), aguievents.WithRunID(runID)))
 	}
 }
 
+func (s *stream) emitRunFinished(
+	event *aguievents.RunFinishedEvent,
+	emit func(aguievents.Event) error,
+) error {
+	if s.runFinished {
+		return nil
+	}
+	s.runFinished = true
+	return emit(event)
+}
+
 // stream converts framework-native execution facts into official AG-UI events.
 // It owns no alternative runtime or business state.
 type stream struct {
-	runID           string
-	entrypoint      string
-	subagents       []*subagentActivation
-	nextID          int
-	messageSequence int
-	textMessageID   string
-	textActive      bool
-	streamedText    bool
+	runID            string
+	entrypoint       string
+	subagents        []*subagentActivation
+	nextID           int
+	toolSequence     int
+	toolIDs          map[string]string
+	messageSequence  int
+	textMessageID    string
+	textSubagentID   string
+	textActive       bool
+	rootStreamedText bool
+	runFinished      bool
 }
 
 type subagentActivation struct {
@@ -178,11 +208,17 @@ func (s *stream) consume(event *session.Event, emit func(aguievents.Event) error
 	if event == nil || event.Content == nil {
 		return nil
 	}
+	subagentID := s.subagentID(event)
+	if s.textActive && s.textSubagentID != subagentID {
+		if err := s.closeText(emit); err != nil {
+			return err
+		}
+	}
 	for _, part := range event.Content.Parts {
 		if part == nil || part.Text == "" || part.Thought {
 			continue
 		}
-		if err := s.emitTextDelta(part.Text, emit); err != nil {
+		if err := s.emitTextDelta(part.Text, subagentID, emit); err != nil {
 			return err
 		}
 	}
@@ -195,8 +231,10 @@ func (s *stream) consume(event *session.Event, emit func(aguievents.Event) error
 			return err
 		}
 		call := part.FunctionCall
-		callID := protocolToolID(s.runID, call.Name, call.ID)
-		if err := emit(aguievents.NewToolCallStartEvent(callID, call.Name)); err != nil {
+		callID := s.createToolCallID(call.Name, call.ID)
+		start := aguievents.NewToolCallStartEvent(callID, call.Name)
+		start.SubagentRunID = subagentID
+		if err := emit(start); err != nil {
 			return err
 		}
 		args, err := json.Marshal(call.Args)
@@ -207,7 +245,9 @@ func (s *stream) consume(event *session.Event, emit func(aguievents.Event) error
 		if delta == "" || delta == "null" {
 			delta = "{}"
 		}
-		if err := emit(aguievents.NewToolCallArgsEvent(callID, delta)); err != nil {
+		argsEvent := aguievents.NewToolCallArgsEvent(callID, delta)
+		argsEvent.SubagentRunID = subagentID
+		if err := emit(argsEvent); err != nil {
 			return err
 		}
 	}
@@ -220,17 +260,22 @@ func (s *stream) consume(event *session.Event, emit func(aguievents.Event) error
 		if err := s.closeText(emit); err != nil {
 			return err
 		}
-		responseID := protocolToolID(s.runID, response.Name, response.ID)
+		responseID := s.toolCallID(response.Name, response.ID)
 		payload, err := json.Marshal(response.Response)
 		if err != nil || len(payload) == 0 || string(payload) == "null" {
 			payload = []byte("{}")
 		}
-		if err := emit(aguievents.NewToolCallResultEvent(s.runID+":tools", responseID, string(payload))); err != nil {
+		resultEvent := aguievents.NewToolCallResultEvent(s.runID+":tools", responseID, string(payload))
+		resultEvent.SubagentRunID = subagentID
+		if err := emit(resultEvent); err != nil {
 			return err
 		}
-		if err := emit(aguievents.NewToolCallEndEvent(responseID)); err != nil {
+		endEvent := aguievents.NewToolCallEndEvent(responseID)
+		endEvent.SubagentRunID = subagentID
+		if err := emit(endEvent); err != nil {
 			return err
 		}
+		delete(s.toolIDs, response.Name)
 	}
 
 	return nil
@@ -245,14 +290,14 @@ func (s *stream) finish(content string, emit func(aguievents.Event) error) error
 	if err := s.closeText(emit); err != nil {
 		return err
 	}
-	if s.streamedText {
+	if s.rootStreamedText {
 		return nil
 	}
 	content = strings.TrimSpace(content)
 	if content == "" {
 		return nil
 	}
-	if err := s.openText(emit); err != nil {
+	if err := s.openText("", emit); err != nil {
 		return err
 	}
 	if err := emit(aguievents.NewTextMessageContentEvent(s.textMessageID, content)); err != nil {
@@ -261,36 +306,69 @@ func (s *stream) finish(content string, emit func(aguievents.Event) error) error
 	return s.closeText(emit)
 }
 
-func (s *stream) openText(emit func(aguievents.Event) error) error {
+func (s *stream) openText(subagentID string, emit func(aguievents.Event) error) error {
 	if s.textActive {
 		return nil
 	}
 	s.messageSequence++
 	s.textMessageID = fmt.Sprintf("%s:assistant:%d", s.runID, s.messageSequence)
+	s.textSubagentID = subagentID
 	s.textActive = true
-	s.streamedText = true
-	return emit(aguievents.NewTextMessageStartEvent(
+	if subagentID == "" {
+		s.rootStreamedText = true
+	}
+	start := aguievents.NewTextMessageStartEvent(
 		s.textMessageID,
 		aguievents.WithRole(string(aguitypes.RoleAssistant)),
-	))
+	)
+	start.SubagentRunID = subagentID
+	start.Name = s.activationName(subagentID)
+	return emit(start)
 }
 
-func (s *stream) emitTextDelta(delta string, emit func(aguievents.Event) error) error {
-	if err := s.openText(emit); err != nil {
+func (s *stream) emitTextDelta(delta, subagentID string, emit func(aguievents.Event) error) error {
+	if err := s.openText(subagentID, emit); err != nil {
 		return err
 	}
-	return emit(aguievents.NewTextMessageContentEvent(s.textMessageID, delta))
+	content := aguievents.NewTextMessageContentEvent(s.textMessageID, delta)
+	content.SubagentRunID = subagentID
+	return emit(content)
 }
 
 func (s *stream) closeText(emit func(aguievents.Event) error) error {
 	if !s.textActive {
 		return nil
 	}
-	if err := emit(aguievents.NewTextMessageEndEvent(s.textMessageID)); err != nil {
+	end := aguievents.NewTextMessageEndEvent(s.textMessageID)
+	end.SubagentRunID = s.textSubagentID
+	if err := emit(end); err != nil {
 		return err
 	}
 	s.textActive = false
+	s.textSubagentID = ""
 	return nil
+}
+
+func (s *stream) subagentID(event *session.Event) string {
+	if event == nil || event.Author == "" || event.Author == s.entrypoint {
+		return ""
+	}
+	branch := eventBranch(event)
+	for index := len(s.subagents) - 1; index >= 0; index-- {
+		if isBranchPrefix(s.subagents[index].branch, branch) {
+			return s.subagents[index].id
+		}
+	}
+	return ""
+}
+
+func (s *stream) activationName(subagentID string) string {
+	for _, activation := range s.subagents {
+		if activation.id == subagentID {
+			return activation.name
+		}
+	}
+	return ""
 }
 
 func (s *stream) observeSubagent(event *session.Event, emit func(aguievents.Event) error) error {
@@ -514,19 +592,35 @@ func conversationText(content any) (string, error) {
 	}
 }
 
-func protocolToolID(runID, toolName, id string) string {
-	if id != "" {
-		return id
-	}
-	return runID + ":" + toolName
-}
-
 func opaqueJSON(value any) json.RawMessage {
 	raw, err := json.Marshal(value)
 	if err != nil || bytes.Equal(raw, []byte("null")) {
 		return json.RawMessage("{}")
 	}
 	return raw
+}
+
+func (s *stream) createToolCallID(toolName, id string) string {
+	if id != "" {
+		return id
+	}
+	if s.toolIDs == nil {
+		s.toolIDs = make(map[string]string)
+	}
+	if existing, ok := s.toolIDs[toolName]; ok {
+		return existing
+	}
+	s.toolSequence++
+	generated := fmt.Sprintf("%s:tools:%s:%d", s.runID, toolName, s.toolSequence)
+	s.toolIDs[toolName] = generated
+	return generated
+}
+
+func (s *stream) toolCallID(toolName, id string) string {
+	if id != "" {
+		return id
+	}
+	return s.toolIDs[toolName]
 }
 
 func publicErrorMessage(err error) string {

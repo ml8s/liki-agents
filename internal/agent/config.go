@@ -11,31 +11,30 @@ import (
 )
 
 type Config struct {
-	AppName          string
-	Model            string
-	ModelBaseURL     string
-	ModelAPIKey      string
-	ModelTimeout     time.Duration
-	Temperature      float64
-	AuditRecorder    audit.Recorder
-	Metrics          Metrics
-	Provider         string
-	StructuredOutput string
-	ContractVersion  string
-	GraphVersion     string
-	Deployment       *Deployment
-	EngineMCPURL     string
-	EngineToken      string
-	EngineTimeout    time.Duration
-	Now              func() time.Time
-	Logger           *slog.Logger
-	TracerProvider   trace.TracerProvider
+	AppName           string
+	Model             string
+	ModelBaseURL      string
+	ModelAPIKey       string
+	ModelTimeout      time.Duration
+	Temperature       float64
+	AuditRecorder     audit.Recorder
+	Metrics           Metrics
+	Provider          string
+	StructuredOutput  string
+	ContractVersion   string
+	GraphVersion      string
+	Deployment        *Deployment
+	MCPTimeout        time.Duration
+	MaxConcurrentRuns int
+	Now               func() time.Time
+	Logger            *slog.Logger
+	TracerProvider    trace.TracerProvider
 
 	// modelOverride is an internal test seam. Production builds always
 	// construct the OpenAI-compatible provider in NewRuntime.
 	modelOverride model.LLM
 
-	// engineTransportOverride is an internal test seam for protocol health
+	// mcpTransportOverrides is an internal test seam for protocol health
 	// tests. Production always uses the official Streamable HTTP transport.
-	engineTransportOverride mcp.Transport
+	mcpTransportOverrides map[string]mcp.Transport
 }

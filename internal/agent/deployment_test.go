@@ -37,6 +37,7 @@ func validManifest() string {
 		"kind": "AgentDeployment",
 		"metadata": {"name": "generic-agents", "version": "1.0.0"},
 		"spec": {
+			"mcpServers": [{"name": "test", "endpointEnv": "TEST_MCP_ENDPOINT"}],
 			"agents": [{
 				"name": "main",
 				"version": "1.0.0",
@@ -48,7 +49,7 @@ func validManifest() string {
 					"schema": {"path": "output.schema.json"},
 					"textPointer": "/answer"
 				},
-				"tools": {"allow": ["test_tool"]}
+				"tools": {"allow": {"test": ["test_tool"]}}
 			}]
 		}
 	}`
@@ -76,6 +77,13 @@ func TestLoadAgentDeployment(t *testing.T) {
 	if len(entrypoint.GenaiOutputSchema.Properties) != 1 {
 		t.Fatalf("output properties = %+v", entrypoint.GenaiOutputSchema.Properties)
 	}
+	if len(deployment.Spec.MCPServers) != 1 || deployment.Spec.MCPServers[0].Name != "test" {
+		t.Fatalf("MCP servers = %+v", deployment.Spec.MCPServers)
+	}
+	references := entrypoint.Tools.References()
+	if len(references) != 1 || references[0] != (ToolReference{Server: "test", Name: "test_tool"}) {
+		t.Fatalf("tool references = %+v", references)
+	}
 }
 
 func TestLoadAgentDeploymentRejectsInvalidManifests(t *testing.T) {
@@ -84,11 +92,48 @@ func TestLoadAgentDeploymentRejectsInvalidManifests(t *testing.T) {
 		manifest string
 		wantErr  string
 	}{
-		{name: "unknown field", manifest: `{"apiVersion":"agent.liki/v1","kind":"AgentDeployment","metadata":{"name":"x","version":"1"},"spec":{"agents":[{"name":"main","version":"1","description":"x","mode":"chat","instruction":{"path":"instruction.md"},"tools":{"allow":[]}}]},"extra":true}`, wantErr: "extra"},
+		{name: "unknown field", manifest: `{"apiVersion":"agent.liki/v1","kind":"AgentDeployment","metadata":{"name":"x","version":"1"},"spec":{"agents":[{"name":"main","version":"1","description":"x","mode":"chat","instruction":{"path":"instruction.md"},"tools":{"allow":{}}}]},"extra":true}`, wantErr: "extra"},
+		{name: "duplicate key", manifest: strings.Replace(validManifest(), `"kind": "AgentDeployment"`, `"kind": "AgentDeployment", "kind": "AgentDeployment"`, 1), wantErr: `duplicate key "kind" at $`},
+		{name: "trailing value", manifest: validManifest() + ` {}`, wantErr: "trailing"},
 		{name: "unsupported api", manifest: strings.Replace(validManifest(), `agent.liki/v1`, `agent.liki/v0`, 1), wantErr: `const: agent.liki/v0 does not equal agent.liki/v1`},
 		{name: "unknown sub-agent", manifest: strings.Replace(validManifest(), `"sub_agents": []`, `"sub_agents": [{"name":"missing"}]`, 1), wantErr: "unknown sub-agent"},
 
 		{name: "path traversal", manifest: strings.Replace(validManifest(), `instruction.md`, `../instruction.md`, 1), wantErr: "path escapes from parent"},
+		{
+			name: "unknown MCP server",
+			manifest: strings.Replace(
+				validManifest(),
+				`"allow": {"test": ["test_tool"]}`,
+				`"allow": {"missing": ["test_tool"]}`,
+				1,
+			),
+			wantErr: `references unknown MCP server "missing"`,
+		},
+		{
+			name: "duplicate MCP server",
+			manifest: strings.Replace(
+				validManifest(),
+				`"mcpServers": [{"name": "test", "endpointEnv": "TEST_MCP_ENDPOINT"}]`,
+				`"mcpServers": [{"name": "test", "endpointEnv": "TEST_MCP_ENDPOINT"}, {"name": "test", "endpointEnv": "TEST_MCP_ENDPOINT"}]`,
+				1,
+			),
+			wantErr: `duplicate MCP server "test"`,
+		},
+		{
+			name: "duplicate tool name across servers",
+			manifest: strings.Replace(
+				strings.Replace(
+					validManifest(),
+					`"mcpServers": [{"name": "test", "endpointEnv": "TEST_MCP_ENDPOINT"}]`,
+					`"mcpServers": [{"name": "test", "endpointEnv": "TEST_MCP_ENDPOINT"}, {"name": "other", "endpointEnv": "OTHER_MCP_ENDPOINT"}]`,
+					1,
+				),
+				`"allow": {"test": ["test_tool"]}`,
+				`"allow": {"test": ["test_tool"], "other": ["test_tool"]}`,
+				1,
+			),
+			wantErr: `allowlisted by multiple MCP servers`,
+		},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -107,6 +152,25 @@ func TestLoadAgentDeploymentRejectsInvalidManifests(t *testing.T) {
 				t.Fatalf("LoadAgentDeployment() error = %v, want %q", err, testCase.wantErr)
 			}
 		})
+	}
+}
+
+func TestLoadAgentDeploymentRejectsAmbiguousOutputSchema(t *testing.T) {
+	manifest := strings.Replace(validManifest(), `"answer": {"type": "string"}`, `"answer": {"type": "string"}, "answer": {"type": "string"}`, 1)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(`{"type":"object","answer":{"type":"string"},"answer":{"type":"string"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(manifest), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadAgentDeployment(filepath.Join(root, "agent-deployment.json"))
+	if err == nil || !strings.Contains(err.Error(), `duplicate key "answer"`) {
+		t.Fatalf("LoadAgentDeployment() error = %v, want duplicate output schema key rejection", err)
 	}
 }
 
@@ -138,7 +202,7 @@ func TestAgentOutputIsOptional(t *testing.T) {
 				"description": "generic main agent",
 				"mode": "chat",
 				"instruction": {"path": "instruction.md"},
-				"tools": {"allow": []}
+				"tools": {"allow": {}}
 			}]
 		}
 	}`
@@ -230,14 +294,15 @@ func TestAgentOutputRequiresPairedSchemaAndPointer(t *testing.T) {
 }
 
 func TestLoadAgentDeploymentValidatesGraph(t *testing.T) {
-	worker := `{"name":"worker","version":"1.0.0","description":"worker agent","mode":"task","sub_agents":[],"instruction":{"path":"instruction.md"},"output":{"schema":{"path":"output.schema.json"},"textPointer":"/answer"},"tools":{"allow":["test_tool"]}}`
+	worker := `{"name":"worker","version":"1.0.0","description":"worker agent","mode":"task","sub_agents":[],"instruction":{"path":"instruction.md"},"output":{"schema":{"path":"output.schema.json"},"textPointer":"/answer"},"tools":{"allow":{"test":["test_tool"]}}}`
 	base := `{
 		"apiVersion": "agent.liki/v1",
 		"kind": "AgentDeployment",
 		"metadata": {"name": "generic-agents", "version": "1.0.0"},
 		"spec": {
+			"mcpServers": [{"name": "test", "endpointEnv": "TEST_MCP_ENDPOINT"}],
 			"agents": [
-				{"name": "coordinator", "version": "1.0.0", "description": "coordinator", "mode": "chat", "sub_agents": [{"name": "worker"}], "instruction": {"path": "instruction.md"}, "output": {"schema": {"path": "output.schema.json"}, "textPointer": "/answer"}, "tools": {"allow": ["test_tool"]}},
+				{"name": "coordinator", "version": "1.0.0", "description": "coordinator", "mode": "chat", "sub_agents": [{"name": "worker"}], "instruction": {"path": "instruction.md"}, "output": {"schema": {"path": "output.schema.json"}, "textPointer": "/answer"}, "tools": {"allow": {"test": ["test_tool"]}}},
 				%s
 			]
 		}

@@ -9,7 +9,8 @@ skill/project.
 | Concept | Meaning |
 |---|---|
 | AgentDeployment | External deployment artifact containing one or more Agent definitions |
-| AgentDefinition | One Agent's instruction, optional output schema, and tool allowlist |
+| AgentDefinition | One Agent's instruction, optional output schema, and server-scoped tool allowlist |
+| MCP server | A logical external tool dependency bound through environment references |
 | Run | One stateless execution identified by `RunID` and `ThreadID` |
 | Tool execution | One allowlisted MCP tool invocation |
 | LLM call | One auditable model invocation inside a run |
@@ -21,21 +22,25 @@ skill/project.
 2. Prompt and output schema are external files, not Go defaults.
 3. `output.textPointer` selects the user-facing string from validated output.
 4. An empty tool allowlist means the Agent has no tool access.
-5. Instruction and schema digests identify exact behavior; a plain-text Agent
+5. Tool authorization is scoped to a declared logical MCP server and explicit
+   tool name.
+6. Instruction and schema digests identify exact behavior; a plain-text Agent
    has an empty schema digest.
-6. Deployment, instruction, and schema digests enter audit evidence.
+7. Deployment, instruction, and schema digests enter audit evidence.
 
 ## Execution invariants
 
 1. Only allowlisted MCP tools can be exposed or invoked.
 2. Tool input/output are audited as canonical digests and sizes, never raw payload.
-3. Plain text is the default output contract.
-4. Structured output is optional and validated against the Agent's external
+3. Run, thread, and user identifiers are required; an active RunID is exclusive.
+4. ADK working sessions are run-scoped and removed at terminal execution.
+5. Plain text is the default output contract.
+6. Structured output is optional and validated against the Agent's external
    JSON Schema.
-5. `RunResult.Output` is generic validated JSON for structured Agents.
-6. `RunResult.Text` is final model text for plain Agents or the configured
+7. `RunResult.Output` is generic validated JSON for structured Agents.
+8. `RunResult.Text` is final model text for plain Agents or the configured
    JSON Pointer value for structured Agents.
-7. Failed runs mark pending tool executions as interrupted so every tool has a
+9. Failed runs mark pending tool executions as interrupted so every tool has a
    terminal audit event.
 
 ## Audit invariants
@@ -45,8 +50,8 @@ skill/project.
 3. Every model call has started and terminal lifecycle evidence.
 4. Every tool call has started and terminal lifecycle evidence, including
    interrupted calls.
-5. Audit records version and digest provenance, but not secrets, prompts, raw
-   model output, or tool payloads.
+5. Audit records protocol, trace correlation, version, and digest provenance,
+   but not secrets, prompts, raw model output, or tool payloads.
 6. Audit write failures fail closed; cancellation does not prevent terminal
    audit events.
 

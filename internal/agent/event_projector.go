@@ -80,6 +80,17 @@ func (p eventProjector) projectFinal(
 	definition *AgentDefinition,
 	exposeModelText bool,
 ) (*session.Event, bool) {
+	if event.Content == nil {
+		// ADK can represent a terminal state transition without model content.
+		// Keep the event visible so protocol adapters can consume StateDelta,
+		// but never expose an absent model response as text.
+		if event.Actions.StateDelta == nil {
+			return nil, false
+		}
+		projected := *event
+		projected.Content = nil
+		return &projected, true
+	}
 	if definition != nil && definition.Output.Structured() {
 		exposeModelText = false
 	}

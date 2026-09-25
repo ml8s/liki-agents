@@ -4,6 +4,8 @@ package a2a
 
 import (
 	"context"
+	"encoding/gob"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -23,6 +25,14 @@ const (
 	// Path is the canonical JSON-RPC binding declared by the Agent Card.
 	Path = "/a2a"
 )
+
+type executionCancelKey struct{}
+
+func init() {
+	// ADK's in-process A2A artifact path copies Part.Data with gob. Preserve
+	// JSON numbers lexically instead of coercing them through float64.
+	gob.Register(json.Number(""))
+}
 
 // Config owns the public transport declaration for A2A discovery.
 type Config struct {
@@ -48,8 +58,13 @@ func New(runtime *agent.Runtime, config Config) (*Server, error) {
 		config.RunTimeout = 10 * time.Minute
 	}
 	root := runtime.RootAgent()
-	capabilities := a2a.AgentCapabilities{Streaming: true}
 	deployment := runtime.Deployment()
+	entrypoint := runtime.Entrypoint()
+	outputModes := []string{"text/plain"}
+	if entrypoint.Output.Structured() {
+		outputModes = append(outputModes, "application/json")
+	}
+	capabilities := a2a.AgentCapabilities{Streaming: true}
 	capabilities.Extensions = []a2a.AgentExtension{{
 		URI:         "https://liki.hk/contracts/agent-deployment-v1",
 		Description: "AgentDeployment provenance metadata",
@@ -79,7 +94,7 @@ func New(runtime *agent.Runtime, config Config) (*Server, error) {
 			{"liki_service_bearer": {}},
 		},
 		DefaultInputModes:  []string{"text/plain"},
-		DefaultOutputModes: []string{"text/plain"},
+		DefaultOutputModes: outputModes,
 		Skills:             safeAgentSkills(deployment),
 	}
 
@@ -87,7 +102,7 @@ func New(runtime *agent.Runtime, config Config) (*Server, error) {
 		RunnerConfig: runtime.RunnerConfig(),
 		GenAIPartConverter: func(_ context.Context, event *session.Event, part *genai.Part) (*a2a.Part, error) {
 			entrypoint := runtime.Entrypoint()
-			return agentPart(event, part, entrypoint.Output.Structured(), entrypoint.Name, entrypoint.Output.TextPointer)
+			return agentPart(event, part, entrypoint.Output.Structured(), entrypoint)
 		},
 		BeforeExecuteCallback: func(ctx context.Context, request *a2asrv.ExecutorContext) (context.Context, error) {
 			caller := ""
@@ -104,19 +119,25 @@ func New(runtime *agent.Runtime, config Config) (*Server, error) {
 				RunID:    string(request.TaskID),
 				ThreadID: request.ContextID,
 				UserID:   caller,
+				Protocol: "a2a",
 			}
+			ctx, cancelExecution := context.WithTimeout(ctx, config.RunTimeout)
+			ctx = context.WithValue(ctx, executionCancelKey{}, cancelExecution)
 			if err := runtime.BeginAuditRun(ctx, request.ContextID, scope); err != nil {
+				cancelExecution()
 				return nil, err
 			}
 			return ctx, nil
 		},
 		AfterExecuteCallback: func(ctx adka2a.ExecutorContext, _ *a2a.TaskStatusUpdateEvent, err error) error {
+			cancelExecution(ctx)
 			if auditErr := runtime.EndAuditRun(ctx, ctx.SessionID(), err); auditErr != nil {
 				return auditErr
 			}
 			return nil
 		},
 		A2AExecutionCleanupCallback: func(ctx context.Context, request *a2asrv.ExecutorContext, _ []*a2a.AgentCard, _ a2a.SendMessageResult, cause error) {
+			cancelExecution(ctx)
 			if auditErr := runtime.EndAuditRun(ctx, request.ContextID, cause); auditErr != nil {
 				// Cleanup has no error channel; a failed append is deliberately fatal to the process boundary only
 				// when the enclosing execution reports it. Keep the call explicit here.
@@ -134,6 +155,12 @@ func New(runtime *agent.Runtime, config Config) (*Server, error) {
 	discovery := a2asrv.NewStaticAgentCardHandler(&card)
 	endpoint := a2asrv.NewJSONRPCHandler(requestHandler)
 	return &Server{endpoint: endpoint, discovery: discovery}, nil
+}
+
+func cancelExecution(ctx context.Context) {
+	if cancel, ok := ctx.Value(executionCancelKey{}).(context.CancelFunc); ok {
+		cancel()
+	}
 }
 
 // safeAgentSkills builds standard A2A skills from curated deployment metadata.
@@ -155,8 +182,8 @@ func safeAgentSkills(deployment *agent.Deployment) []a2a.AgentSkill {
 		if isEntrypoint {
 			tags = append(tags, "entrypoint")
 		}
-		for _, tool := range definition.Tools.Allow {
-			tags = append(tags, "tool:"+tool)
+		for _, reference := range definition.Tools.References() {
+			tags = append(tags, "tool:"+reference.Server+"/"+reference.Name)
 		}
 		if definition.Output.Structured() {
 			tags = append(tags, "structured-output")
@@ -189,8 +216,7 @@ func agentPart(
 	event *session.Event,
 	part *genai.Part,
 	structured bool,
-	entrypoint string,
-	textPointer string,
+	entrypoint *agent.AgentDefinition,
 ) (*a2a.Part, error) {
 	if part == nil {
 		return nil, nil
@@ -212,17 +238,23 @@ func agentPart(
 		}
 		return adka2a.ToA2APart(part, longRunningToolIDs)
 	}
-	if event != nil && event.Author == entrypoint && event.IsFinalResponse() {
-		value, ok := event.Actions.StateDelta[agent.StructuredOutputStateKey]
+	if event != nil && event.Author == entrypoint.Name && event.IsFinalResponse() {
+		value, ok := event.Actions.StateDelta[agent.StructuredOutputStateKey(entrypoint.Name)]
 		if ok {
-			answer, err := agent.OutputText(value, textPointer)
+			output, err := agent.ParseStructuredOutput(value, entrypoint)
 			if err != nil {
 				return nil, err
 			}
-			answer = strings.TrimSpace(answer)
-			if answer != "" {
-				return a2a.NewTextPart(answer), nil
+			var data map[string]any
+			decoder := json.NewDecoder(strings.NewReader(string(output.JSON)))
+			decoder.UseNumber()
+			if err := decoder.Decode(&data); err != nil {
+				return nil, fmt.Errorf("decode structured A2A data: %w", err)
 			}
+			dataPart := a2a.NewDataPart(data)
+			dataPart.MediaType = "application/json"
+			dataPart.Metadata = map[string]any{"liki.answer": output.Text}
+			return dataPart, nil
 		}
 	}
 	return nil, nil

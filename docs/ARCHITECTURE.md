@@ -5,13 +5,13 @@
 `liki-agents` is a generic multi-agent runtime. `liki-web` owns users,
 authentication, products, payments, entitlements, quota, and durable product
 conversations. The Liki skill/project owns prompts, skills, domain policy, and
-tool semantics. Engine exposes deterministic tools through MCP.
+tool semantics. External MCP servers expose deterministic and judgment tools.
 
 ```text
 Server / machine client
   ↓ A2A JSON-RPC
 ┌────────────┐   MCP Streamable HTTP
-│ liki-agents │──────────────────────→ Engine / tools
+│ liki-agents │──────────────────────→ MCP tools (Engine, Counsel, ...)
 └────────────┘
   ↑ AG-UI SSE
 liki-web gateway
@@ -29,7 +29,8 @@ incoming-edge-free Agent is the entrypoint. Each Agent definition supplies:
 - optional JSON Schema for structured output;
 - paired JSON Pointer selecting the user-facing text when structured output is
   declared;
-- MCP tool allowlist;
+- logical MCP server declarations with endpoint/token environment references;
+- server-scoped MCP tool allowlists;
 - standard ADK delegation mode and `sub_agents`;
 - version.
 
@@ -59,7 +60,7 @@ cmd/liki-agents
   → internal/protocol/a2a
   → internal/protocol/agui
   → internal/agent
-  → Engine MCP / model provider
+  → MCP servers / model provider
 
 internal/audit/sqlite
   → internal/audit
@@ -91,28 +92,44 @@ A protocol request is mapped to a generic `RunRequest`. History and opaque
 protocol context may be supplied by the caller; the runtime does not store
 product conversation state.
 
+Run, thread, and user identifiers are required. A RunID cannot start while it
+is active, and an ADK session is run-scoped: terminal execution removes the
+working session so the runtime does not retain prompts, model events, or tool
+responses in memory.
+Both protocol adapters enforce the configured total run deadline, and the
+runtime bounds concurrent model/MCP executions with
+`LIKI_MAX_CONCURRENT_RUNS`.
+
 The entrypoint `AgentDefinition` supplies instruction, an optional output
 schema, and the tool allowlist. Plain text is the default. When structured
 output is declared, the runtime uses ADK's OpenAI-compatible model integration
 and selects either native JSON schema or provider-safe JSON object mode.
 
-Engine tools are consumed through MCP Streamable HTTP and filtered by the
-AgentDefinition allowlist. Tool calls and responses become protocol facts and
-execution evidence; model assertions do not create tool provenance.
+MCP tools are consumed through MCP Streamable HTTP and filtered by the
+server-scoped AgentDefinition allowlist. Tool calls and responses become
+protocol facts and execution evidence; model assertions do not create tool
+provenance.
 
 Raw structured model output is not emitted to protocol observers. Partial
 events are suppressed. A structured Agent returns validated generic JSON plus
 the user-facing text selected by its configured JSON Pointer; a plain-text
-Agent returns final model text directly.
+Agent returns final model text directly. Structured output state keys are
+Agent-scoped, so delegated structured Agents cannot overwrite the entrypoint
+result.
 
 ## Protocols
 
 A2A uses the official A2A Go SDK JSON-RPC binding and ADK A2A executor.
 
+MCP endpoint bindings are deployment-owned complete URLs. A gateway may expose
+service prefixes such as `/engine` and `/counsel`; the MCP service owns its
+standard `/mcp` and `/mcp/{domain}` routes. The runtime consumes the configured
+URL verbatim through the official MCP SDK and does not translate paths.
+
 Google ADK is the internal execution runtime, not the public control plane. The
 ADK Launcher/REST API is intentionally not exposed. External clients use only
-the standard protocol surfaces above; MCP readiness is exercised at startup and
-on `/readyz`.
+the standard protocol surfaces above; MCP readiness is exposed through
+`/readyz`.
 
 AG-UI decodes the official `RunAgentInput` and emits official SSE events. The
 supported profile is text chat; unsupported capabilities are rejected rather
@@ -128,8 +145,8 @@ Event mapping:
 | sub-agent start | `SUBAGENT_STARTED` |
 | sub-agent end | `SUBAGENT_FINISHED` |
 | sub-agent failure | `SUBAGENT_ERROR` |
-| Engine call | `TOOL_CALL_START` / `TOOL_CALL_ARGS` |
-| Engine response | `TOOL_CALL_RESULT` / `TOOL_CALL_END` |
+| MCP tool call | `TOOL_CALL_START` / `TOOL_CALL_ARGS` with sub-agent attribution |
+| MCP tool response | `TOOL_CALL_RESULT` / `TOOL_CALL_END` with sub-agent attribution |
 | final answer | `TEXT_MESSAGE_START` / `TEXT_MESSAGE_CONTENT` / `TEXT_MESSAGE_END` |
 | success | `RUN_FINISHED` |
 | failure | `RUN_ERROR` |
@@ -143,11 +160,12 @@ prompts, raw model output, or tool payloads.
 
 ## Operations
 
-Health, version, readiness, and metrics are standard transport endpoints. All
+Version, readiness, and metrics are standard transport endpoints. All
 POST endpoints enforce a 2 MB body limit.
 
-Readiness checks SQLite and Engine MCP through the official MCP discovery RPC.
-It requires the configured MCP revision, server identity, and tool capability.
+Readiness checks SQLite and every declared MCP dependency through the official
+MCP discovery RPC. It requires the configured MCP revision, server identity,
+tool capability, and every allowlisted tool.
 
 Prometheus exposes protocol request count and duration, active streams, LLM
 calls and tokens, tool calls and duration, and dependency readiness. Structured
@@ -155,9 +173,9 @@ logging uses `log/slog` with stable event names. Logs do not contain user prompt
 raw model output, or tool payloads.
 
 Audit events are append-only SQLite records. They contain execution metadata,
-digests, versions, status, duration, and error codes—not conversation or domain
-payloads. In-flight runs are not recoverable after crash; clients start a new
-run.
+protocol, trace correlation, agent and deployment digests, versions, status,
+duration, and error codes—not conversation or domain payloads. In-flight runs
+are not recoverable after crash; clients start a new run.
 
 ## Observability and audit implementation
 
@@ -168,10 +186,9 @@ The system separates telemetry from durable evidence:
 - OpenTelemetry emits distributed traces over the standard OTLP protocol.
 - SQLite stores immutable audit events.
 
-ADK emits standard spans for Agent invocation, model generation, delegation, and
-tool execution. The runtime adds an `agent.run` span and propagates W3C trace
-context. Trace IDs and span IDs are also stored on audit events so a compliance
-record can be correlated with its distributed trace without duplicating payloads.
+The runtime emits an `agent.run` span and propagates W3C trace context. Trace
+IDs and span IDs are also stored on audit events so a compliance record can be
+correlated with its distributed trace without duplicating payloads.
 
 OpenTelemetry is enabled only when a standard OTLP endpoint is present:
 

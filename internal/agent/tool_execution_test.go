@@ -71,8 +71,9 @@ func newToolAuditor(t *testing.T) (*ToolExecutionAuditor, *recordingAudit, *stub
 func TestToolAuditorRecordsSuccessfulCall(t *testing.T) {
 	auditor, events, metrics, ctx := newToolAuditor(t)
 	args := map[string]any{"question": "career"}
-	if _, err := auditor.BeforeTool(ctx, fakeTool("test_tool"), args); err != nil {
-		t.Fatalf("BeforeTool() error = %v", err)
+	replacement, err := auditor.BeforeTool(ctx, fakeTool("test_tool"), args)
+	if replacement != nil || err != nil {
+		t.Fatalf("BeforeTool() = %#v, %v, want nil replacement", replacement, err)
 	}
 	if _, err := auditor.AfterTool(ctx, fakeTool("test_tool"), args, map[string]any{"answer": "ok"}, nil); err != nil {
 		t.Fatalf("AfterTool() error = %v", err)
@@ -97,8 +98,23 @@ func TestToolAuditorRecordsSuccessfulCall(t *testing.T) {
 	if got := completed[0].Payload["output_bytes"]; got.(int64) == 0 {
 		t.Fatalf("output bytes = %#v, want non-zero", got)
 	}
+	if completed[0].Payload["mcp_server"] != "test" {
+		t.Fatalf("MCP server provenance = %#v, want test", completed[0].Payload["mcp_server"])
+	}
 	if len(metrics.calls) != 1 || metrics.calls[0] != "main/test_tool/succeeded" {
 		t.Fatalf("tool metrics = %v", metrics.calls)
+	}
+}
+
+func TestToolAuditorRejectsToolOutsideAgentAllowlist(t *testing.T) {
+	auditor, events, _, ctx := newToolAuditor(t)
+	_, err := auditor.BeforeTool(ctx, fakeTool("unauthorized_tool"), nil)
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeToolCallInvalid {
+		t.Fatalf("BeforeTool() error = %v, want %s", err, domain.CodeToolCallInvalid)
+	}
+	if got := len(events.eventsOfType(audit.EventToolCallStarted)); got != 0 {
+		t.Fatalf("unauthorized tool audit events = %d, want 0", got)
 	}
 }
 
@@ -107,7 +123,7 @@ func TestToolAuditorRecordsFailedCall(t *testing.T) {
 	if _, err := auditor.BeforeTool(ctx, fakeTool("test_tool"), nil); err != nil {
 		t.Fatalf("BeforeTool() error = %v", err)
 	}
-	toolErr := errors.New("tool failed")
+	toolErr := errors.New("tool failed: secret domain payload")
 	result, auditErr := auditor.AfterTool(ctx, fakeTool("test_tool"), nil, nil, toolErr)
 	if !errors.Is(auditErr, toolErr) || result != nil {
 		t.Fatalf("AfterTool() = %#v, %v, want original error", result, auditErr)
@@ -118,6 +134,9 @@ func TestToolAuditorRecordsFailedCall(t *testing.T) {
 	}
 	if failed[0].ErrorCode != domain.CodeToolExecutionFailed {
 		t.Fatalf("error code = %s", failed[0].ErrorCode)
+	}
+	if strings.Contains(failed[0].ErrorMessage, "secret") {
+		t.Fatalf("failed audit event leaked tool payload: %q", failed[0].ErrorMessage)
 	}
 	if failed[0].TraceID == "" || failed[0].SpanID == "" {
 		t.Fatal("failed audit event lacks trace correlation")
@@ -133,11 +152,10 @@ func TestToolAuditorFailsPendingWhenRunEnds(t *testing.T) {
 		t.Fatalf("BeforeTool() error = %v", err)
 	}
 
-	cause := errors.New("run terminated")
-	if err := auditor.FailPending(context.Background(), newTestScope(), cause); err != nil {
+	if err := auditor.FailPending(context.Background(), newTestScope()); err != nil {
 		t.Fatalf("FailPending() error = %v", err)
 	}
-	if err := auditor.FailPending(context.Background(), newTestScope(), cause); err != nil {
+	if err := auditor.FailPending(context.Background(), newTestScope()); err != nil {
 		t.Fatalf("second FailPending() error = %v", err)
 	}
 
@@ -148,14 +166,68 @@ func TestToolAuditorFailsPendingWhenRunEnds(t *testing.T) {
 	if failed[0].ErrorCode != domain.CodeToolExecutionInterrupted {
 		t.Fatalf("error code = %s, want %s", failed[0].ErrorCode, domain.CodeToolExecutionInterrupted)
 	}
-	if failed[0].ErrorMessage != cause.Error() {
-		t.Fatalf("error message = %q, want %q", failed[0].ErrorMessage, cause.Error())
+	if failed[0].ErrorMessage != "tool execution interrupted by run end" {
+		t.Fatalf("error message = %q, want sanitized terminal message", failed[0].ErrorMessage)
 	}
 	if failed[0].Payload["input_digest"].(string) == "" {
 		t.Fatal("interrupted tool audit lacks input digest")
 	}
 	if len(metrics.calls) != 1 || !strings.HasSuffix(metrics.calls[0], "/failed") {
 		t.Fatalf("tool metrics = %v", metrics.calls)
+	}
+}
+
+type failOnceAudit struct {
+	recordingAudit
+	eventType audit.EventType
+	failed    bool
+}
+
+func (r *failOnceAudit) Record(ctx context.Context, event *audit.Event) error {
+	if event != nil && event.Type == r.eventType && !r.failed {
+		r.failed = true
+		return errors.New("temporary audit store failure")
+	}
+	return r.recordingAudit.Record(ctx, event)
+}
+
+func TestToolAuditorRetainsPendingWhenTerminalAuditWriteFails(t *testing.T) {
+	events := &failOnceAudit{eventType: audit.EventToolCallCompleted}
+	deployment := NewTestDeployment(t)
+	ledger := newLLMLedger(events, nil, "test-provider", deployment, fixedLedgerNow)
+	auditor := newToolExecutionAuditor(
+		events,
+		nil,
+		fixedLedgerNow,
+		"test-provider",
+		deployment,
+		ledger.scope,
+	)
+	scope := newTestScope()
+	ledger.begin("session_1", scope)
+	ctx := &fakeAgentContext{
+		sessionID:      "session_1",
+		invocationID:   "inv_1",
+		agentName:      "main",
+		functionCallID: "call_1",
+	}
+	if _, err := auditor.BeforeTool(ctx, fakeTool("test_tool"), nil); err != nil {
+		t.Fatalf("BeforeTool() error = %v", err)
+	}
+	if _, err := auditor.AfterTool(ctx, fakeTool("test_tool"), nil, map[string]any{"ok": true}, nil); err == nil {
+		t.Fatal("AfterTool() unexpectedly survived terminal audit failure")
+	}
+	if err := auditor.FailPending(context.Background(), scope); err != nil {
+		t.Fatalf("FailPending() reconciliation error = %v", err)
+	}
+	if got := len(events.eventsOfType(audit.EventToolCallFailed)); got != 1 {
+		t.Fatalf("terminal failed events = %d, want 1", got)
+	}
+	if err := auditor.FailPending(context.Background(), scope); err != nil {
+		t.Fatalf("second FailPending() error = %v", err)
+	}
+	if got := len(events.eventsOfType(audit.EventToolCallFailed)); got != 1 {
+		t.Fatalf("terminal failed events after reconciliation = %d, want 1", got)
 	}
 }
 

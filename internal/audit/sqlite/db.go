@@ -39,6 +39,14 @@ func Open(path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
+	if path != ":memory:" {
+		if err := os.Chmod(path, 0o600); err != nil {
+			if sqlDB, closeErr := gormDB.DB(); closeErr == nil {
+				_ = sqlDB.Close()
+			}
+			return nil, fmt.Errorf("restrict sqlite permissions: %w", err)
+		}
+	}
 	sqlDB, err := gormDB.DB()
 	if err != nil {
 		return nil, fmt.Errorf("get sqlite handle: %w", err)

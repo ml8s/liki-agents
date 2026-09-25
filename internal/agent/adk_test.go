@@ -32,13 +32,13 @@ func TestAgentDefinitionCompilesToStandardADKConfig(t *testing.T) {
 		InstructionText:   "generic instruction",
 		GenaiOutputSchema: &genai.Schema{Type: genai.TypeObject},
 		RawOutputSchema:   rawSchema,
-		Tools:             ToolAllowlist{Allow: []string{"engine_tool"}},
+		Tools:             ToolAllowlist{Allow: map[string][]string{"test": {"test_tool"}}},
 	}
 
 	beforeModel := func(adkagent.Context, *model.LLMRequest) (*model.LLMResponse, error) { return nil, nil }
 	config := definition.ADKConfig(ADKAgentRuntime{
 		RawOutputSchema:      rawSchema,
-		Toolset:              staticToolset{},
+		Toolsets:             []tool.Toolset{staticToolset{}},
 		SubAgents:            []adkagent.Agent{nil},
 		Temperature:          temperature,
 		OutputKey:            "structured_output",

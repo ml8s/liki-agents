@@ -14,7 +14,7 @@ import (
 type ADKAgentRuntime struct {
 	RawOutputSchema map[string]any
 	Model           model.LLM
-	Toolset         tool.Toolset
+	Toolsets        []tool.Toolset
 	SubAgents       []agent.Agent
 	Temperature     float32
 	OutputKey       string
@@ -39,15 +39,13 @@ func (a *AgentDefinition) ADKConfig(runtime ADKAgentRuntime) llmagent.Config {
 		}, beforeModelCallbacks...)
 	}
 	return llmagent.Config{
-		Name:        a.Name,
-		Description: a.Description,
-		Mode:        adkMode(a.Mode),
-		Model:       runtime.Model,
-		Instruction: a.InstructionText,
-		SubAgents:   runtime.SubAgents,
-		Toolsets: []tool.Toolset{
-			tool.FilterToolset(runtime.Toolset, tool.AllowedToolsPredicate(a.Tools.Allow)),
-		},
+		Name:                     a.Name,
+		Description:              a.Description,
+		Mode:                     adkMode(a.Mode),
+		Model:                    runtime.Model,
+		Instruction:              a.InstructionText,
+		SubAgents:                runtime.SubAgents,
+		Toolsets:                 runtime.Toolsets,
 		BeforeModelCallbacks:     beforeModelCallbacks,
 		AfterModelCallbacks:      runtime.AfterModelCallbacks,
 		OnModelErrorCallbacks:    runtime.OnModelErrorCallbacks,

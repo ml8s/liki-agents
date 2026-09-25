@@ -15,21 +15,18 @@ const (
 	// SchemaV1 is the stable contract for all v1 audit events.
 	SchemaV1 = "audit.liki/v1"
 
-	EventRunStarted            EventType = "run.started"
-	EventRunCompleted          EventType = "run.completed"
-	EventRunFailed             EventType = "run.failed"
-	EventLLMCallStarted        EventType = "llm.call.started"
-	EventLLMCallCompleted      EventType = "llm.call.completed"
-	EventLLMCallFailed         EventType = "llm.call.failed"
-	EventToolCallStarted       EventType = "tool.call.started"
-	EventToolCallCompleted     EventType = "tool.call.completed"
-	EventToolCallFailed        EventType = "tool.call.failed"
-	EventDelegationStarted     EventType = "agent.delegation.started"
-	EventDelegationCompleted   EventType = "agent.delegation.completed"
-	EventDelegationFailed      EventType = "agent.delegation.failed"
-	EventOutputRejected        EventType = "output.rejected"
-	EventClarificationProduced EventType = "clarification.produced"
-	EventDefinitionLoadFailed  EventType = "definition.load.failed"
+	EventRunStarted          EventType = "run.started"
+	EventRunCompleted        EventType = "run.completed"
+	EventRunFailed           EventType = "run.failed"
+	EventLLMCallStarted      EventType = "llm.call.started"
+	EventLLMCallCompleted    EventType = "llm.call.completed"
+	EventLLMCallFailed       EventType = "llm.call.failed"
+	EventToolCallStarted     EventType = "tool.call.started"
+	EventToolCallCompleted   EventType = "tool.call.completed"
+	EventToolCallFailed      EventType = "tool.call.failed"
+	EventDelegationStarted   EventType = "agent.delegation.started"
+	EventDelegationCompleted EventType = "agent.delegation.completed"
+	EventDelegationFailed    EventType = "agent.delegation.failed"
 )
 
 // EventType identifies a lifecycle fact. Event names are stable contracts.
@@ -105,6 +102,8 @@ func (e *Event) Validate() error {
 		return NewError(CodeSchemaUnsupported, "unsupported audit event schema", fmt.Errorf("%q", e.SchemaVersion))
 	case e.Type == "":
 		return NewError(CodeTypeRequired, "audit event type is required")
+	case !knownEventType(e.Type):
+		return NewError(CodeTypeInvalid, "unknown audit event type", fmt.Errorf("%q", e.Type))
 	case e.OccurredAt.IsZero():
 		return NewError(CodeOccurredAtRequired, "audit event occurred_at is required")
 	case e.RunID == "":
@@ -134,6 +133,32 @@ func (e *Event) Validate() error {
 	}
 
 	switch e.Type {
+	case EventRunStarted, EventLLMCallStarted, EventToolCallStarted, EventDelegationStarted:
+		if e.Status != StatusRunning {
+			return NewError(CodeStatusInvalid, "started audit event must be running")
+		}
+	case EventRunCompleted, EventLLMCallCompleted, EventToolCallCompleted, EventDelegationCompleted:
+		if e.Status != StatusSucceeded {
+			return NewError(CodeStatusInvalid, "completed audit event must be succeeded")
+		}
+	case EventRunFailed, EventLLMCallFailed, EventToolCallFailed, EventDelegationFailed:
+		if e.Status != StatusFailed {
+			return NewError(CodeStatusInvalid, "failed audit event must be failed")
+		}
+		if e.ErrorCode == "" {
+			return NewError(CodeErrorCodeRequired, "failed audit event requires an error code")
+		}
+	}
+
+	switch e.Type {
+	case EventLLMCallStarted, EventLLMCallCompleted, EventLLMCallFailed:
+		if e.AgentName == "" || e.Model == "" {
+			return NewError(CodeLLMProvenanceRequired, "LLM audit event requires agent and model provenance")
+		}
+	case EventDelegationStarted, EventDelegationCompleted, EventDelegationFailed:
+		if e.CallerAgent == "" || e.TargetAgent == "" {
+			return NewError(CodeDelegationProvenanceRequired, "delegation audit event requires caller and target agents")
+		}
 	case EventToolCallStarted, EventToolCallCompleted, EventToolCallFailed:
 		if e.ToolCallID == "" {
 			return NewError(CodeToolCallIDRequired, "tool audit event call id is required")
@@ -147,6 +172,18 @@ func (e *Event) Validate() error {
 		return NewError(CodeToolExecutionFailed, "tool failure audit event requires an error code")
 	}
 	return nil
+}
+
+func knownEventType(eventType EventType) bool {
+	switch eventType {
+	case EventRunStarted, EventRunCompleted, EventRunFailed,
+		EventLLMCallStarted, EventLLMCallCompleted, EventLLMCallFailed,
+		EventToolCallStarted, EventToolCallCompleted, EventToolCallFailed,
+		EventDelegationStarted, EventDelegationCompleted, EventDelegationFailed:
+		return true
+	default:
+		return false
+	}
 }
 
 func validateTraceIDs(traceID string, spanID string) error {
@@ -184,20 +221,25 @@ func NewError(code string, message string, cause ...error) error {
 // Common audit error codes. They live beside the event contract so all audit
 // adapters return the same stable identifiers.
 const (
-	CodeIDRequired             = "audit_event_id_required"
-	CodeSchemaUnsupported      = "audit_event_schema_unsupported"
-	CodeTypeRequired           = "audit_event_type_required"
-	CodeOccurredAtRequired     = "audit_event_occurred_at_required"
-	CodeRunIDRequired          = "audit_event_run_id_required"
-	CodeRootRunIDRequired      = "audit_event_root_run_id_required"
-	CodeInvalidDelegationDepth = "audit_event_delegation_depth_invalid"
-	CodeStatusInvalid          = "audit_event_status_invalid"
-	CodeInvalidDuration        = "audit_event_duration_invalid"
-	CodeTraceIDInvalid         = "audit_event_trace_id_invalid"
-	CodeSpanIDInvalid          = "audit_event_span_id_invalid"
-	CodeToolCallIDRequired     = "audit_event_tool_call_id_required"
-	CodeToolNameRequired       = "audit_event_tool_name_required"
-	CodeToolExecutionFailed    = "audit_event_tool_execution_failed"
-	CodeRecorderRequired       = "audit_recorder_required"
-	CodeAuditAppendFailed      = "audit_append_failed"
+	CodeIDRequired                   = "audit_event_id_required"
+	CodeSchemaUnsupported            = "audit_event_schema_unsupported"
+	CodeTypeRequired                 = "audit_event_type_required"
+	CodeTypeInvalid                  = "audit_event_type_invalid"
+	CodeErrorCodeRequired            = "audit_event_error_code_required"
+	CodeLLMProvenanceRequired        = "audit_event_llm_provenance_required"
+	CodeDelegationProvenanceRequired = "audit_event_delegation_provenance_required"
+	CodeOccurredAtRequired           = "audit_event_occurred_at_required"
+	CodeRunIDRequired                = "audit_event_run_id_required"
+	CodeRootRunIDRequired            = "audit_event_root_run_id_required"
+	CodeInvalidDelegationDepth       = "audit_event_delegation_depth_invalid"
+	CodeStatusInvalid                = "audit_event_status_invalid"
+	CodeInvalidDuration              = "audit_event_duration_invalid"
+	CodeTraceIDInvalid               = "audit_event_trace_id_invalid"
+	CodeSpanIDInvalid                = "audit_event_span_id_invalid"
+	CodeToolCallIDRequired           = "audit_event_tool_call_id_required"
+	CodeToolNameRequired             = "audit_event_tool_name_required"
+	CodeToolExecutionFailed          = "audit_event_tool_execution_failed"
+	CodeRecorderRequired             = "audit_recorder_required"
+	CodeAuditAppendFailed            = "audit_append_failed"
+	CodeAuditEventConflict           = "audit_event_conflict"
 )
