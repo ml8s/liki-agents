@@ -13,10 +13,12 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/ml8s/liki-agents/contracts"
+	jsonpointer "github.com/qri-io/jsonpointer"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/genai"
 )
@@ -488,6 +490,84 @@ func (a *AgentDefinition) validate(mcpServers map[string]struct{}) error {
 	return nil
 }
 
+func validateOutputPointer(schema *jsonschema.Schema, pointer string) error {
+	pointerValue, err := jsonpointer.Parse(pointer)
+	if err != nil {
+		return fmt.Errorf("parse RFC 6901 JSON Pointer: %w", err)
+	}
+	tokens := []string(pointerValue)
+	current := schema
+	for index, token := range tokens {
+		if current == nil {
+			return fmt.Errorf("token %d resolves to no schema", index)
+		}
+		switch {
+		case current.Type == "array" || current.Items != nil || len(current.ItemsArray) != 0:
+			if token != "-" && !isDecimal(token) {
+				return fmt.Errorf("array token %q must be an index or '-'", token)
+			}
+			switch {
+			case current.Items != nil:
+				current = current.Items
+			case token != "-" && len(current.ItemsArray) != 0:
+				arrayIndex, _ := strconv.Atoi(token)
+				if arrayIndex < 0 || arrayIndex >= len(current.ItemsArray) {
+					return fmt.Errorf("array index %d is outside prefix items", arrayIndex)
+				}
+				current = current.ItemsArray[arrayIndex]
+			default:
+				return errors.New("array item schema is not statically known")
+			}
+		case current.Type == "object" || len(current.Properties) != 0:
+			property, exists := current.Properties[token]
+			if !exists {
+				if current.AdditionalProperties != nil {
+					current = current.AdditionalProperties
+					continue
+				}
+				return fmt.Errorf("object token %q has no statically known property schema", token)
+			}
+			current = property
+		default:
+			return fmt.Errorf("token %q traverses a non-container schema", token)
+		}
+	}
+	if current == nil || !selectsString(current) {
+		return fmt.Errorf("pointer %q must select a string schema", pointer)
+	}
+	return nil
+}
+
+func isDecimal(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func selectsString(schema *jsonschema.Schema) bool {
+	if schema == nil {
+		return false
+	}
+	if schema.Type == "string" {
+		return true
+	}
+	if schema.Type != "" || len(schema.Enum) == 0 {
+		return false
+	}
+	for _, value := range schema.Enum {
+		if _, ok := value.(string); !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // ToolReferenceFor returns the logical MCP server binding for a tool name.
 // Deployment validation rejects duplicate tool names across servers for one
 // Agent, making this lookup deterministic after artifact validation.
@@ -557,6 +637,9 @@ func (l *definitionLoader) loadAgents(deployment *Deployment) error {
 			genaiSchema, err := convertJSONSchemaToGenai(&outputSchema)
 			if err != nil {
 				return fmt.Errorf("agent %q output schema: %w", agent.Name, err)
+			}
+			if err := validateOutputPointer(&outputSchema, agent.Output.TextPointer); err != nil {
+				return fmt.Errorf("agent %q output.textPointer: %w", agent.Name, err)
 			}
 			if genaiSchema.Type != genai.TypeObject {
 				return fmt.Errorf("agent %q output schema root must be an object", agent.Name)

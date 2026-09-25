@@ -65,15 +65,6 @@ func New(runtime *agent.Runtime, config Config) (*Server, error) {
 		outputModes = append(outputModes, "application/json")
 	}
 	capabilities := a2a.AgentCapabilities{Streaming: true}
-	capabilities.Extensions = []a2a.AgentExtension{{
-		URI:         "https://liki.hk/contracts/agent-deployment-v1",
-		Description: "AgentDeployment provenance metadata",
-		Params: map[string]any{
-			"name":    deployment.Metadata.Name,
-			"version": deployment.Metadata.Version,
-			"digest":  deployment.Digest,
-		},
-	}}
 	securityScheme := a2a.HTTPAuthSecurityScheme{
 		Scheme:       "Bearer",
 		BearerFormat: "opaque",

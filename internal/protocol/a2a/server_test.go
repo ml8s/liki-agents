@@ -133,12 +133,8 @@ func TestAgentCardDeclaresStandardJSONRPCBinding(t *testing.T) {
 	if strings.Contains(response.Body.String(), "You are a generic adapter test agent.") {
 		t.Fatal("Agent Card leaked Agent instruction")
 	}
-	if len(card.Capabilities.Extensions) != 1 ||
-		card.Capabilities.Extensions[0].URI != "https://liki.hk/contracts/agent-deployment-v1" {
-		t.Fatalf("deployment extension = %+v", card.Capabilities.Extensions)
-	}
-	if card.Capabilities.Extensions[0].Params["digest"] == "" {
-		t.Fatalf("deployment digest = %#v, want non-empty", card.Capabilities.Extensions[0].Params["digest"])
+	if len(card.Capabilities.Extensions) != 0 {
+		t.Fatalf("Agent Card extensions = %+v; private protocol extensions must not be advertised", card.Capabilities.Extensions)
 	}
 }
 

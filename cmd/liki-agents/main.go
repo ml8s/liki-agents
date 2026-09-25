@@ -82,6 +82,7 @@ func run() error {
 		ContractVersion:   cfg.ToolContract,
 		GraphVersion:      buildinfo.GraphVersion,
 		Deployment:        deployment,
+		DeploymentDigest:  cfg.DeploymentDigest,
 		MCPTimeout:        cfg.MCPTimeout,
 		MaxConcurrentRuns: cfg.MaxConcurrentRuns,
 	})

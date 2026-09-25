@@ -39,7 +39,9 @@ The manifest is validated against the canonical JSON Schema 2020-12 contract
 before graph and file semantics are evaluated.
 The deployment digest covers the manifest plus resolved instruction and output
 schema artifacts and the ADK graph semantics; it is not a hash of the manifest
-alone.
+alone. Production may pin that complete digest with
+`LIKI_AGENTS_DEPLOYMENT_DIGEST`; startup fails closed when the loaded artifact
+does not match.
 
 ## Principles
 
@@ -119,7 +121,12 @@ result.
 
 ## Protocols
 
+Protocol choices are governed by [`STANDARDS.md`](STANDARDS.md); a private wire
+protocol must not replace a reviewed standard.
+
 A2A uses the official A2A Go SDK JSON-RPC binding and ADK A2A executor.
+The runtime uses the executor's standard ContextID-to-ADK-session mapping. No
+private A2A extension, RPC method, or state machine is advertised.
 
 MCP endpoint bindings are deployment-owned complete URLs. A gateway may expose
 service prefixes such as `/engine` and `/counsel`; the MCP service owns its

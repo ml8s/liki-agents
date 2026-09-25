@@ -7,7 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/ml8s/liki-agents/internal/domain"
 )
 
 type Config struct {
@@ -19,6 +22,7 @@ type Config struct {
 	DBPath              string
 	ToolContract        string
 	DeploymentFile      string
+	DeploymentDigest    string
 	MCPTimeout          time.Duration
 	MaxConcurrentRuns   int
 	RunTimeout          time.Duration
@@ -44,6 +48,7 @@ func Load() (Config, error) {
 		DBPath:              getEnv("LIKI_DB_PATH", ""),
 		ToolContract:        getEnv("LIKI_TOOL_CONTRACT_VERSION", ""),
 		DeploymentFile:      getEnv("LIKI_AGENTS_DEPLOYMENT_FILE", ""),
+		DeploymentDigest:    strings.TrimSpace(getEnv("LIKI_AGENTS_DEPLOYMENT_DIGEST", "")),
 		MaxConcurrentRuns:   32,
 		LLMBaseURL:          getEnv("LIKI_LLM_BASE_URL", "https://api.openai.com/v1"),
 		LLMAPIKey:           getEnv("LIKI_LLM_API_KEY", ""),
@@ -93,6 +98,9 @@ func validate(cfg Config) (Config, error) {
 	}
 	if cfg.DeploymentFile == "" {
 		return Config{}, fmt.Errorf("LIKI_AGENTS_DEPLOYMENT_FILE is required")
+	}
+	if cfg.DeploymentDigest != "" && !domain.IsValidSHA256Digest(cfg.DeploymentDigest) {
+		return Config{}, fmt.Errorf("LIKI_AGENTS_DEPLOYMENT_DIGEST must be sha256:<64-hex>")
 	}
 	switch cfg.LLMProvider {
 	case "openai", "zhipu", "bigmodel", "glm":

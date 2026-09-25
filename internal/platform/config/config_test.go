@@ -39,6 +39,14 @@ func TestLoadValidConfiguration(t *testing.T) {
 	if cfg.MaxConcurrentRuns != 7 {
 		t.Fatalf("max concurrent runs = %d, want 7", cfg.MaxConcurrentRuns)
 	}
+	t.Setenv("LIKI_AGENTS_DEPLOYMENT_DIGEST", "sha256:"+strings.Repeat("a", 64))
+	cfg, err = config.Load()
+	if err != nil {
+		t.Fatalf("Load(deployment digest) error = %v", err)
+	}
+	if cfg.DeploymentDigest != "sha256:"+strings.Repeat("a", 64) {
+		t.Fatalf("deployment digest = %q", cfg.DeploymentDigest)
+	}
 }
 
 func TestLoadRejectsInvalidSettings(t *testing.T) {
@@ -49,6 +57,7 @@ func TestLoadRejectsInvalidSettings(t *testing.T) {
 		wantErr string
 	}{
 		{name: "missing deployment", key: "LIKI_AGENTS_DEPLOYMENT_FILE", value: "", wantErr: "LIKI_AGENTS_DEPLOYMENT_FILE is required"},
+		{name: "invalid deployment digest", key: "LIKI_AGENTS_DEPLOYMENT_DIGEST", value: "sha256:abc", wantErr: "LIKI_AGENTS_DEPLOYMENT_DIGEST"},
 		{name: "unsupported provider", key: "LIKI_LLM_PROVIDER", value: "unknown", wantErr: "LIKI_LLM_PROVIDER is unsupported"},
 		{name: "unsupported structured output", key: "LIKI_LLM_STRUCTURED_OUTPUT", value: "yaml", wantErr: "LIKI_LLM_STRUCTURED_OUTPUT is unsupported"},
 		{name: "invalid public url", key: "LIKI_AGENTS_PUBLIC_URL", value: "agent.internal", wantErr: "LIKI_AGENTS_PUBLIC_URL must be an absolute HTTP(S) URL"},

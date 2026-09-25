@@ -190,6 +190,58 @@ func TestAgentDefinitionOutputIsStrictlyValidated(t *testing.T) {
 	}
 }
 
+func TestAgentOutputPointerMustSelectAStringAtLoadTime(t *testing.T) {
+	tests := []struct {
+		name    string
+		pointer string
+		schema  string
+		wantErr string
+	}{
+		{
+			name:    "missing property",
+			pointer: "/missing",
+			schema:  `{"type":"object","properties":{"answer":{"type":"string"}}}`,
+			wantErr: `token "missing" has no statically known property schema`,
+		},
+		{
+			name:    "number property",
+			pointer: "/answer",
+			schema:  `{"type":"object","properties":{"answer":{"type":"number"}}}`,
+			wantErr: "must select a string schema",
+		},
+		{
+			name:    "array item",
+			pointer: "/answers/0",
+			schema:  `{"type":"object","properties":{"answers":{"type":"array","items":{"type":"string"}}}}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			manifest := strings.Replace(validManifest(), `"/answer"`, `"`+test.pointer+`"`, 1)
+			if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(test.schema), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(manifest), 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := LoadAgentDeployment(filepath.Join(root, "agent-deployment.json"))
+			if test.wantErr == "" {
+				if err != nil {
+					t.Fatalf("LoadAgentDeployment() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("LoadAgentDeployment() error = %v, want %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestAgentOutputIsOptional(t *testing.T) {
 	plainManifest := `{
 		"apiVersion": "agent.liki/v1",

@@ -53,9 +53,10 @@ JSON Pointer to the user-facing string. Tool access is denied unless the tool is
 listed in that Agent's server-scoped `tools.allow` map.
 
 The artifact is validated against
-[`contracts/agent-definition.schema.json`](contracts/agent-definition.schema.json).
-Its digest covers the manifest, referenced instruction and schema files, and the
-ADK graph semantics.
+[`contracts/agent-definition.schema.json`](contracts/agent-definition.schema.json);
+external boundaries follow [`docs/STANDARDS.md`](docs/STANDARDS.md). Its digest
+covers the manifest, referenced instruction and schema files, and the ADK graph
+semantics.
 
 ## Protocols
 
@@ -100,7 +101,7 @@ records do not contain prompts, raw model output, or tool payloads.
 
 | Prefix / variable | Purpose |
 |---|---|
-| `LIKI_AGENTS_*` | service address, token, data path, deployment artifact |
+| `LIKI_AGENTS_*` | service address, token, data path, artifact and optional digest pin |
 | `LIKI_DB_PATH` | SQLite audit database |
 | `LIKI_MCP_*`, `LIKI_*_MCP_TOKEN` | endpoint/token bindings for logical MCP servers |
 | `LIKI_TOOL_CONTRACT_VERSION`, `LIKI_MAX_CONCURRENT_RUNS` | provenance and bounded concurrent executions |
@@ -119,10 +120,10 @@ Use an empty `LIKI_LLM_STRUCTURED_OUTPUT` for plain-text deployments;
 ## Operations
 
 Use `make run` for the host process and `make dev` for the containerized
-development service. Both run in the foreground and stop with `Ctrl-C`. `make dev`
-also starts the development Engine and Counsel MCP fixtures.
-`make dev-down` removes the Compose workload; `make db-backup` creates an
-online SQLite backup.
+development service and MCP fixtures. `make dev-down` removes the Compose
+workload; `make db-backup` creates an online SQLite backup.
+The current runtime supports one process/replica; see
+[`docs/STANDARDS.md`](docs/STANDARDS.md) for the prerequisites for scaling it.
 
 ## Observability
 
@@ -175,5 +176,4 @@ approval workflows, or a management console.
 
 `liki-web` owns users, products, entitlements, quotas, and durable product
 conversations. A Liki domain release owns prompts, skills, workflow policy, and
-tool semantics. External MCP services such as Engine and Counsel own
-deterministic tool implementations.
+tool semantics; Engine and Counsel own deterministic MCP implementations.

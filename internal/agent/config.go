@@ -24,6 +24,7 @@ type Config struct {
 	ContractVersion   string
 	GraphVersion      string
 	Deployment        *Deployment
+	DeploymentDigest  string
 	MCPTimeout        time.Duration
 	MaxConcurrentRuns int
 	Now               func() time.Time
