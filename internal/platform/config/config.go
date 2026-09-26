@@ -102,13 +102,14 @@ func Load() (Config, error) {
 }
 
 func validate(cfg Config) (Config, error) {
+	isDevelopment := cfg.Env == "development"
 	if cfg.ToolContract == "" {
 		return Config{}, fmt.Errorf("LIKI_TOOL_CONTRACT_VERSION is required")
 	}
-	if cfg.Env != "development" && cfg.InternalToken == "" {
+	if !isDevelopment && cfg.InternalToken == "" {
 		return Config{}, fmt.Errorf("LIKI_AGENTS_INTERNAL_TOKEN is required outside development")
 	}
-	if cfg.Env != "development" && cfg.LLMAPIKey == "" {
+	if !isDevelopment && cfg.LLMAPIKey == "" {
 		return Config{}, fmt.Errorf("LIKI_LLM_API_KEY is required outside development")
 	}
 	if cfg.DBPath == "" {
@@ -116,6 +117,9 @@ func validate(cfg Config) (Config, error) {
 	}
 	if cfg.DeploymentFile == "" {
 		return Config{}, fmt.Errorf("LIKI_AGENTS_DEPLOYMENT_FILE is required")
+	}
+	if !isDevelopment && cfg.DeploymentDigest == "" {
+		return Config{}, fmt.Errorf("LIKI_AGENTS_DEPLOYMENT_DIGEST is required outside development")
 	}
 	if cfg.DeploymentDigest != "" && !domain.IsValidSHA256Digest(cfg.DeploymentDigest) {
 		return Config{}, fmt.Errorf("LIKI_AGENTS_DEPLOYMENT_DIGEST must be sha256:<64-hex>")
@@ -150,6 +154,9 @@ func validate(cfg Config) (Config, error) {
 	if cfg.MaxConcurrentRuns <= 0 {
 		return Config{}, fmt.Errorf("LIKI_MAX_CONCURRENT_RUNS must be greater than zero")
 	}
+	if cfg.MaxConcurrentRuns > 1024 {
+		return Config{}, fmt.Errorf("LIKI_MAX_CONCURRENT_RUNS must not exceed 1024")
+	}
 	if cfg.LLMTimeout <= 0 {
 		return Config{}, fmt.Errorf("LIKI_LLM_TIMEOUT_SECONDS must be greater than zero")
 	}
@@ -167,9 +174,18 @@ func validate(cfg Config) (Config, error) {
 	if err != nil || publicURL.Scheme != "http" && publicURL.Scheme != "https" || publicURL.Host == "" {
 		return Config{}, fmt.Errorf("LIKI_AGENTS_PUBLIC_URL must be an absolute HTTP(S) URL")
 	}
+	if publicURL.User != nil {
+		return Config{}, fmt.Errorf("LIKI_AGENTS_PUBLIC_URL must not contain embedded credentials")
+	}
 	llmURL, err := url.Parse(cfg.LLMBaseURL)
 	if err != nil || llmURL.Scheme != "http" && llmURL.Scheme != "https" || llmURL.Host == "" {
 		return Config{}, fmt.Errorf("LIKI_LLM_BASE_URL must be an absolute HTTP(S) URL")
+	}
+	if llmURL.User != nil {
+		return Config{}, fmt.Errorf("LIKI_LLM_BASE_URL must not contain embedded credentials")
+	}
+	if !isDevelopment && llmURL.Scheme != "https" {
+		return Config{}, fmt.Errorf("LIKI_LLM_BASE_URL must use HTTPS outside development")
 	}
 	return cfg, nil
 }

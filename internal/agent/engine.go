@@ -82,7 +82,7 @@ func checkMCPDependencyHealth(
 	config Config,
 	server resolvedMCPServer,
 	requiredTools []ToolReference,
-) error {
+) (err error) {
 	if _, overridden := config.mcpTransportOverrides[server.definition.Name]; !overridden {
 		if err := validateMCPEndpoint(server); err != nil {
 			return err
@@ -99,15 +99,19 @@ func checkMCPDependencyHealth(
 	if override, ok := config.mcpTransportOverrides[server.definition.Name]; ok {
 		transport = override
 	}
-	session, err := client.Connect(
+	session, connectErr := client.Connect(
 		ctx,
 		transport,
 		&mcp.ClientSessionOptions{ProtocolVersion: mcpProtocolVersion()},
 	)
-	if err != nil {
-		return err
+	if connectErr != nil {
+		return connectErr
 	}
-	defer session.Close()
+	defer func() {
+		if closeErr := session.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close MCP session after health check: %w", closeErr)
+		}
+	}()
 
 	result := session.InitializeResult()
 	if result == nil {
@@ -122,9 +126,9 @@ func checkMCPDependencyHealth(
 	if result.Capabilities == nil || result.Capabilities.Tools == nil {
 		return errors.New("server does not advertise tool capability")
 	}
-	listed, err := session.ListTools(ctx, nil)
-	if err != nil {
-		return err
+	listed, listErr := session.ListTools(ctx, nil)
+	if listErr != nil {
+		return listErr
 	}
 	advertised := make(map[string]struct{}, len(listed.Tools))
 	for _, tool := range listed.Tools {

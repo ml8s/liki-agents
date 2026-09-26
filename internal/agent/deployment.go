@@ -667,10 +667,16 @@ func (l *definitionLoader) readFile(path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open agent deployment directory: %w", err)
 	}
-	defer root.Close()
 	data, err := root.ReadFile(path)
 	if err != nil {
+		closeErr := root.Close()
+		if closeErr != nil {
+			return nil, fmt.Errorf("read %q (close failed: %w): %w", path, closeErr, err)
+		}
 		return nil, err
+	}
+	if err := root.Close(); err != nil {
+		return nil, fmt.Errorf("close agent deployment directory: %w", err)
 	}
 	return data, nil
 }

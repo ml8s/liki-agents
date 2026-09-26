@@ -51,7 +51,7 @@ reviewed candidate replaces this service's local loader contract.
 |---|---|---|
 | Mapping every A2A TaskID to a separate ADK session while preserving ContextID only as correlation | Contradicted the SDK/ADK ContextID mapping and silently changed multi-task context behavior | Use ADK's default ContextID session mapping. |
 | A private AgentDeployment `tools.visibility` field that emitted empty tool arguments/results | No A2A/AG-UI/MCP semantics for selective payload redaction; AG-UI args/result values are required to be non-empty | Do not emit the feature. If opaque tools are required later, omit the complete standard tool-call event sequence rather than redefine its fields. |
-| Startup reconciliation of every unfinished audit event | No external audit-recovery standard; unsafe with more than one replica | Keep crash behavior explicit: a client starts a new run. Future reconciliation requires transactional ownership, not unconditional startup writes. |
+| Unconditional multi-replica startup reconciliation | No external audit-recovery standard; concurrent owners could race or rewrite evidence | Keep `multi` fail-closed. Single-process startup uses one transaction, stable lifecycle IDs, and append-only synthetic failures before traffic is accepted. |
 | Publishing `https://liki.hk/contracts/agent-deployment-v1` as an A2A extension | A2A extensions require an identified, published specification and client opt-in behavior | Advertise no private extension. Standard Agent Card fields and internal audit already carry required identity and provenance. |
 | Local RFC 6901 escape parser | Duplicated an existing RFC implementation already used by the runtime | Parse pointers with `github.com/qri-io/jsonpointer`. |
 

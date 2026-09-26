@@ -40,9 +40,9 @@ func (p eventProjector) Project(event *session.Event) (*session.Event, bool) {
 
 	var projected *session.Event
 	if event.Partial {
-		projected, exposeModelText = p.projectPartial(event, definition, exposeModelText)
+		projected = p.projectPartial(event, definition, exposeModelText)
 	} else {
-		projected, exposeModelText = p.projectFinal(event, definition, exposeModelText)
+		projected = p.projectFinal(event, definition, exposeModelText)
 	}
 	if projected == nil {
 		return nil, false
@@ -54,14 +54,14 @@ func (p eventProjector) projectPartial(
 	event *session.Event,
 	definition *AgentDefinition,
 	exposeModelText bool,
-) (*session.Event, bool) {
+) *session.Event {
 	if !exposeModelText {
-		return nil, false
+		return nil
 	}
 
 	text := nonThoughtTextParts(event)
 	if len(text) == 0 {
-		return nil, false
+		return nil
 	}
 
 	if definition != nil {
@@ -72,24 +72,24 @@ func (p eventProjector) projectPartial(
 		Role:  event.Content.Role,
 		Parts: text,
 	}
-	return &projected, true
+	return &projected
 }
 
 func (p eventProjector) projectFinal(
 	event *session.Event,
 	definition *AgentDefinition,
 	exposeModelText bool,
-) (*session.Event, bool) {
+) *session.Event {
 	if event.Content == nil {
 		// ADK can represent a terminal state transition without model content.
 		// Keep the event visible so protocol adapters can consume StateDelta,
 		// but never expose an absent model response as text.
 		if event.Actions.StateDelta == nil {
-			return nil, false
+			return nil
 		}
 		projected := *event
 		projected.Content = nil
-		return &projected, true
+		return &projected
 	}
 	if definition != nil && definition.Output.Structured() {
 		exposeModelText = false
@@ -130,13 +130,13 @@ func (p eventProjector) projectFinal(
 	if len(parts) == 0 && !hasToolFact && event.Actions.StateDelta != nil {
 		projected := *event
 		projected.Content = nil
-		return &projected, true
+		return &projected
 	}
 	if len(parts) == 0 {
-		return nil, false
+		return nil
 	}
 	if len(parts) == len(event.Content.Parts) {
-		return event, true
+		return event
 	}
 
 	projected := *event
@@ -144,7 +144,7 @@ func (p eventProjector) projectFinal(
 		Role:  event.Content.Role,
 		Parts: parts,
 	}
-	return &projected, true
+	return &projected
 }
 
 func (p eventProjector) definitionFor(author string) (*AgentDefinition, bool) {

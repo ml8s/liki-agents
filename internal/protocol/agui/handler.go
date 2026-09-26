@@ -623,11 +623,6 @@ func (s *stream) toolCallID(toolName, id string) string {
 	return s.toolIDs[toolName]
 }
 
-func publicErrorMessage(err error) string {
-	message, _ := publicError(err)
-	return message
-}
-
 func publicError(err error) (message, code string) {
 	var domainErr *domain.Error
 	if errors.As(err, &domainErr) {

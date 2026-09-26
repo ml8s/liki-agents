@@ -22,12 +22,9 @@ import (
 	"google.golang.org/genai"
 )
 
-func buildTestDeployment() (*Deployment, error) {
-	root, err := os.MkdirTemp("", "liki-agents-deployment-")
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(root)
+func buildTestDeployment(t testing.TB) (*Deployment, error) {
+	t.Helper()
+	root := t.TempDir()
 	files := map[string]string{
 		"agent-deployment.json": `{
 			"apiVersion": "agent.liki/v1",
@@ -70,8 +67,9 @@ func buildTestDeployment() (*Deployment, error) {
 	return LoadAgentDeployment(filepath.Join(root, "agent-deployment.json"))
 }
 
-func testDeployment() (*Deployment, error) {
-	return buildTestDeployment()
+func testDeployment(t testing.TB) (*Deployment, error) {
+	t.Helper()
+	return buildTestDeployment(t)
 }
 
 func TestRunStateRejectsInvalidStructuredOutput(t *testing.T) {
@@ -604,7 +602,7 @@ func TestRuntimeRunLLMError(t *testing.T) {
 // tests compiled into the same test binary.
 func NewTestDeployment(t testing.TB) *Deployment {
 	t.Setenv("TEST_MCP_ENDPOINT", "in-memory://test")
-	deployment, err := testDeployment()
+	deployment, err := testDeployment(t)
 	if err != nil {
 		t.Fatal(err)
 	}

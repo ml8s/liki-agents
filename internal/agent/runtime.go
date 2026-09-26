@@ -169,6 +169,13 @@ func NewRuntime(config Config) (*Runtime, error) {
 	if config.Now == nil {
 		config.Now = func() time.Time { return time.Now().UTC() }
 	}
+	if recoverer, ok := config.AuditRecorder.(audit.InterruptionRecoverer); ok {
+		recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := recoverer.RecoverInterrupted(recoveryCtx, config.Now()); err != nil {
+			return nil, domain.NewError(domain.CodeRuntimeInitFailed, "recover interrupted audit events", err)
+		}
+	}
 	if config.TracerProvider == nil {
 		config.TracerProvider = otel.GetTracerProvider()
 	}

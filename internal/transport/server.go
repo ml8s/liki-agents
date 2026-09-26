@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -35,9 +36,77 @@ type Services struct {
 }
 
 type Server struct {
-	services  Services
-	routes    *http.ServeMux
-	readiness atomic.Bool
+	services     Services
+	routes       *http.ServeMux
+	readiness    atomic.Bool
+	authFailures *authFailureLimiter
+}
+
+const (
+	authFailureLimit      = 10
+	authFailureWindow     = time.Minute
+	maxAuthFailureSources = 10000
+)
+
+type authFailure struct {
+	count       int
+	windowStart time.Time
+}
+
+type authFailureLimiter struct {
+	mu      sync.Mutex
+	entries map[string]authFailure
+}
+
+func newAuthFailureLimiter() *authFailureLimiter {
+	return &authFailureLimiter{entries: make(map[string]authFailure)}
+}
+
+// tryConsume records one failure and reports whether the source still has
+// budget. Keeping the decision and increment under one lock prevents concurrent
+// requests from exceeding the configured threshold.
+func (l *authFailureLimiter) tryConsume(source string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	record, exists := l.entries[source]
+	if !exists || now.Sub(record.windowStart) >= authFailureWindow {
+		if len(l.entries) >= maxAuthFailureSources {
+			l.pruneLocked(now)
+		}
+		if len(l.entries) >= maxAuthFailureSources {
+			var oldestSource string
+			var oldest time.Time
+			for candidateSource, candidate := range l.entries {
+				if oldest.IsZero() || candidate.windowStart.Before(oldest) {
+					oldestSource, oldest = candidateSource, candidate.windowStart
+				}
+			}
+			delete(l.entries, oldestSource)
+		}
+		record = authFailure{windowStart: now}
+	}
+	if record.count >= authFailureLimit {
+		l.entries[source] = record
+		return false
+	}
+	record.count++
+	l.entries[source] = record
+	return true
+}
+
+func (l *authFailureLimiter) clear(source string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.entries, source)
+}
+
+func (l *authFailureLimiter) pruneLocked(now time.Time) {
+	for source, record := range l.entries {
+		if now.Sub(record.windowStart) >= authFailureWindow {
+			delete(l.entries, source)
+		}
+	}
 }
 
 func New(services Services) (*Server, error) {
@@ -48,12 +117,12 @@ func New(services Services) (*Server, error) {
 		services.Logger = slog.Default()
 	}
 
-	server := &Server{services: services}
+	server := &Server{services: services, authFailures: newAuthFailureLimiter()}
 	server.readiness.Store(true)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /readyz", server.ready)
 	mux.HandleFunc("GET /version", server.version)
-	mux.Handle("GET /metrics", server.metricsHandler())
+	mux.Handle("GET /metrics", server.authorized(server.metricsHandler(), false))
 	mux.Handle("GET /.well-known/agent-card.json", server.services.AgentCard)
 	mux.Handle("POST /a2a", server.authorized(server.bodyLimit(server.services.A2A), false))
 	mux.Handle("POST /ag-ui", server.authorized(server.bodyLimit(server.services.AGUI), true))
@@ -116,21 +185,46 @@ func protocolOperation(path, method string) (protocol, operation string, ok bool
 
 func (s *Server) authorized(next http.Handler, requireIdentity bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		source := requestSource(r.RemoteAddr)
 		if s.services.InternalToken != "" {
 			const prefix = "Bearer "
 			header := r.Header.Get("Authorization")
 			if !strings.HasPrefix(header, prefix) || subtle.ConstantTimeCompare([]byte(header[len(prefix):]), []byte(s.services.InternalToken)) != 1 {
+				if !s.authFailures.tryConsume(source, time.Now()) {
+					w.Header().Set("Retry-After", "60")
+					writeError(w, http.StatusTooManyRequests, domain.CodeRateLimited, "too many authentication failures")
+					return
+				}
 				writeError(w, http.StatusUnauthorized, domain.CodeUnauthorized, "valid service token required")
 				return
 			}
 		}
 		verified, _ := identity.FromContext(r.Context())
 		if requireIdentity && verified.IsZero() {
+			if !s.authFailures.tryConsume(source, time.Now()) {
+				w.Header().Set("Retry-After", "60")
+				writeError(w, http.StatusTooManyRequests, domain.CodeRateLimited, "too many authentication failures")
+				return
+			}
 			writeError(w, http.StatusUnauthorized, domain.CodeIdentityRequired, "verified user identity required")
 			return
 		}
+		s.authFailures.clear(source)
 		next.ServeHTTP(w, r)
 	})
+}
+
+func requestSource(remoteAddr string) string {
+	if remoteAddr == "" {
+		return "unknown"
+	}
+	if host, _, err := net.SplitHostPort(remoteAddr); err == nil && host != "" {
+		remoteAddr = host
+	}
+	if len(remoteAddr) > 128 {
+		remoteAddr = remoteAddr[:128]
+	}
+	return remoteAddr
 }
 
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {

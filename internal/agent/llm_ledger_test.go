@@ -163,7 +163,9 @@ func TestLedgerLifecycleCompletesNormally(t *testing.T) {
 	if last.Status != audit.StatusSucceeded {
 		t.Fatalf("status = %s, want succeeded", last.Status)
 	}
-	ledger.end("session_1", nil)
+	if _, err := ledger.end("session_1", nil); err != nil {
+		t.Fatalf("end clean session: %v", err)
+	}
 	if got := len(recorder.eventsOfType(audit.EventLLMCallFailed)); got != 0 {
 		t.Fatalf("failed events after clean end = %d, want 0", got)
 	}
@@ -224,7 +226,9 @@ func TestLedgerLifecycleFailurePath(t *testing.T) {
 	if last.ErrorCode != domain.CodeRuntimeTimeout {
 		t.Fatalf("error_code = %s, want %s", last.ErrorCode, domain.CodeRuntimeTimeout)
 	}
-	ledger.end("session_1", nil)
+	if _, err := ledger.end("session_1", nil); err != nil {
+		t.Fatalf("end failed session: %v", err)
+	}
 	if got := len(recorder.eventsOfType(audit.EventLLMCallFailed)); got != 1 {
 		t.Fatalf("failed events after end = %d, want 1", got)
 	}
@@ -238,7 +242,9 @@ func TestLedgerInterruptedRunFailsActiveCalls(t *testing.T) {
 	if _, err := ledger.beforeModel(ctx, &model.LLMRequest{Model: "test-model"}); err != nil {
 		t.Fatalf("beforeModel() error = %v", err)
 	}
-	ledger.end("session_1", nil)
+	if _, err := ledger.end("session_1", nil); err != nil {
+		t.Fatalf("end interrupted session: %v", err)
+	}
 	if got := len(recorder.eventsOfType(audit.EventLLMCallFailed)); got != 1 {
 		t.Fatalf("failed events = %d, want 1", got)
 	}
@@ -256,7 +262,9 @@ func TestLedgerDuplicateBeginRejected(t *testing.T) {
 	if ledger.begin("session_1", newTestScope()) {
 		t.Fatal("second begin should fail")
 	}
-	ledger.end("session_1", nil)
+	if _, err := ledger.end("session_1", nil); err != nil {
+		t.Fatalf("end duplicate-begin session: %v", err)
+	}
 	if !ledger.begin("session_1", newTestScope()) {
 		t.Fatal("begin after end should succeed")
 	}
@@ -282,7 +290,9 @@ func TestLedgerConcurrentCallbacksDoNotRace(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	ledger.end("session_1", nil)
+	if _, err := ledger.end("session_1", nil); err != nil {
+		t.Fatalf("end concurrent session: %v", err)
+	}
 	if got := len(recorder.eventsOfType(audit.EventLLMCallStarted)); got != 50 {
 		t.Fatalf("started events = %d, want 50", got)
 	}

@@ -86,3 +86,56 @@ func TestLoadRejectsInvalidSettings(t *testing.T) {
 		})
 	}
 }
+
+func TestProductionConfigurationHardening(t *testing.T) {
+	baseEnv(t)
+	t.Setenv("LIKI_ENV", "production")
+	t.Setenv("LIKI_AGENTS_INTERNAL_TOKEN", "production-service-token")
+	t.Setenv("LIKI_LLM_API_KEY", "production-model-key")
+	t.Setenv("LIKI_AGENTS_DEPLOYMENT_DIGEST", "sha256:"+strings.Repeat("a", 64))
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load(production) error = %v", err)
+	}
+	if cfg.DeploymentDigest == "" {
+		t.Fatal("production deployment digest was not retained")
+	}
+
+	tests := []struct {
+		name    string
+		key     string
+		value   string
+		wantErr string
+	}{
+		{name: "deployment digest required", key: "LIKI_AGENTS_DEPLOYMENT_DIGEST", value: "", wantErr: "LIKI_AGENTS_DEPLOYMENT_DIGEST is required outside development"},
+		{name: "llm endpoint must be HTTPS", key: "LIKI_LLM_BASE_URL", value: "http://127.0.0.1:8080/v1", wantErr: "LIKI_LLM_BASE_URL must use HTTPS outside development"},
+		{name: "public URL credentials rejected", key: "LIKI_AGENTS_PUBLIC_URL", value: "https://user:secret@agent.internal", wantErr: "LIKI_AGENTS_PUBLIC_URL must not contain embedded credentials"},
+		{name: "LLM URL credentials rejected", key: "LIKI_LLM_BASE_URL", value: "https://key:secret@model.internal/v1", wantErr: "LIKI_LLM_BASE_URL must not contain embedded credentials"},
+		{name: "concurrent runs bounded", key: "LIKI_MAX_CONCURRENT_RUNS", value: "1025", wantErr: "LIKI_MAX_CONCURRENT_RUNS must not exceed 1024"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(test.key, test.value)
+			_, err := config.Load()
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("Load() error = %v, want %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestDevelopmentAllowsLocalHTTPAndUnpinnedDeployment(t *testing.T) {
+	baseEnv(t)
+	t.Setenv("LIKI_LLM_BASE_URL", "http://127.0.0.1:8080/v1")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load(local HTTP development) error = %v", err)
+	}
+	if cfg.LLMBaseURL != "http://127.0.0.1:8080/v1" {
+		t.Fatalf("LLM base URL = %q", cfg.LLMBaseURL)
+	}
+	if cfg.DeploymentDigest != "" {
+		t.Fatalf("development deployment digest = %q, want optional/unset", cfg.DeploymentDigest)
+	}
+}

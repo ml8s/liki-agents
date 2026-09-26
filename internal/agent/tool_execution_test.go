@@ -230,7 +230,3 @@ func TestToolAuditorRetainsPendingWhenTerminalAuditWriteFails(t *testing.T) {
 		t.Fatalf("terminal failed events after reconciliation = %d, want 1", got)
 	}
 }
-
-func trackerNames(tracker *toolNameTracker) []string {
-	return tracker.Names()
-}

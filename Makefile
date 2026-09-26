@@ -6,10 +6,11 @@ BUILD_TIME ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS ?= -s -w -X github.com/ml8s/liki-agents/internal/platform/buildinfo.Version=$(VERSION) -X github.com/ml8s/liki-agents/internal/platform/buildinfo.Commit=$(COMMIT) -X github.com/ml8s/liki-agents/internal/platform/buildinfo.BuildTime=$(BUILD_TIME)
 
 TEST_PACKAGES ?= ./...
+COMPOSE_ENV_FILE := $(if $(wildcard .env),--env-file .env)
 
-.PHONY: help fmt fmt-check vet lint-readme test check test-db db-backup db-verify build run dev dev-down validate gate smoke
+.PHONY: help fmt fmt-check vet lint-engine lint-readme test check test-db db-backup db-verify build run dev dev-down validate gate smoke
 help:
-	@echo "make check    - static checks: formatting and vet"
+	@echo "make check    - static checks: docs, formatting, lint, vet, and artifact"
 	@echo "make lint-readme - lint and test developer documentation"
 	@echo "make test     - run isolated tests (no deployed Engine dependency)"
 	@echo "make test-db  - run SQLite persistence tests"
@@ -31,13 +32,16 @@ lint-readme:
 	$(NPM) run lint:docs
 	$(NPM) run test:docs
 
+lint-engine:
+	golangci-lint run ./...
+
 vet:
 	$(GO) vet ./...
 
 test:
 	$(GO) test -race -count=1 $(TEST_PACKAGES)
 
-check: lint-readme fmt-check vet validate
+check: lint-readme fmt-check lint-engine vet validate
 
 test-db:
 	$(GO) test -race -count=1 ./internal/audit/sqlite/...
@@ -71,7 +75,7 @@ validate:
 	@$(GO) run ./cmd/liki-agents validate -deployment $(if $(LIKI_AGENTS_DEPLOYMENT_FILE),$(LIKI_AGENTS_DEPLOYMENT_FILE),./dev/agent-deployment/deployment.json)
 
 dev-down:
-	docker compose --project-directory . -f dev/docker-compose.yml down --remove-orphans
+	docker compose --project-directory . $(COMPOSE_ENV_FILE) -f dev/docker-compose.yml down --remove-orphans
 
 dev:
-	docker compose --project-directory . --profile mcp -f dev/docker-compose.yml up --build --abort-on-container-exit
+	docker compose --project-directory . $(COMPOSE_ENV_FILE) --profile mcp -f dev/docker-compose.yml up --build --abort-on-container-exit

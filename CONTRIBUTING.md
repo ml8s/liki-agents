@@ -4,7 +4,7 @@ Thanks for improving `liki-agents`.
 
 ## Development
 
-1. Install Go 1.26+, Node.js 18+, and Docker.
+1. Install Go 1.26+, Node.js 22+, Docker, and golangci-lint 2.x.
 2. Run `npm ci`.
 3. Start from a focused, small change.
 4. Run the full gate before review:
@@ -14,9 +14,9 @@ make gate
 make build
 ```
 
-`make gate` runs documentation checks, `gofmt` verification, `go vet`,
-artifact validation, and race-enabled Go tests. It does not call a model
-provider or require Engine MCP.
+`make gate` runs documentation checks, `gofmt` verification, `golangci-lint`,
+`go vet`, artifact validation, and race-enabled Go tests. It does not call a
+model provider or require Engine MCP.
 
 ## Design rules
 

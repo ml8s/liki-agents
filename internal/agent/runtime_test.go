@@ -17,8 +17,15 @@ type nopAuditRecorder struct{}
 
 func (nopAuditRecorder) Record(context.Context, *audit.Event) error { return nil }
 
-func fixedNow() time.Time {
-	return time.Date(2026, 9, 22, 1, 2, 3, 0, time.UTC)
+type interruptingAuditRecorder struct {
+	nopAuditRecorder
+	records int
+	err     error
+}
+
+func (r *interruptingAuditRecorder) RecoverInterrupted(context.Context, time.Time) error {
+	r.records++
+	return r.err
 }
 
 func TestNewRuntimeValidatesContract(t *testing.T) {
@@ -98,6 +105,42 @@ func TestNewRuntimePinsDeploymentDigest(t *testing.T) {
 	}
 	if runtime == nil {
 		t.Fatal("NewRuntime(pinned digest) returned nil")
+	}
+}
+
+func TestNewRuntimeRecoversInterruptedAuditBeforeServing(t *testing.T) {
+	deployment := agent.NewTestDeployment(t)
+	t.Setenv("TEST_MCP_ENDPOINT", "http://127.0.0.1:9/mcp")
+
+	failing := &interruptingAuditRecorder{err: errors.New("audit recovery unavailable")}
+	_, err := agent.NewRuntime(agent.Config{
+		Model:            "test-model",
+		ModelAPIKey:      "test-key",
+		Deployment:       deployment,
+		AuditRecorder:    failing,
+		StructuredOutput: agent.StructuredOutputJSONSchema,
+	})
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeRuntimeInitFailed {
+		t.Fatalf("NewRuntime(recovery failure) error = %v, want %s", err, domain.CodeRuntimeInitFailed)
+	}
+	if failing.records != 1 {
+		t.Fatalf("recovery attempts = %d, want 1", failing.records)
+	}
+
+	recovered := &interruptingAuditRecorder{}
+	runtime, err := agent.NewRuntime(agent.Config{
+		Model:            "test-model",
+		ModelAPIKey:      "test-key",
+		Deployment:       deployment,
+		AuditRecorder:    recovered,
+		StructuredOutput: agent.StructuredOutputJSONSchema,
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime(recovery success) error = %v", err)
+	}
+	if runtime == nil || recovered.records != 1 {
+		t.Fatalf("runtime/recovery calls = %#v/%d", runtime, recovered.records)
 	}
 }
 

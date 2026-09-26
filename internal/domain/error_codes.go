@@ -68,6 +68,7 @@ const (
 	// Transport / protocol error codes
 	CodeUnauthorized           = "unauthorized"
 	CodeIdentityRequired       = "identity_required"
+	CodeRateLimited            = "rate_limited"
 	CodeMethodNotAllowed       = "method_not_allowed"
 	CodeInvalidAGUIRequest     = "invalid_agui_request"
 	CodeUnsupportedAGUIFeature = "unsupported_agui_feature"

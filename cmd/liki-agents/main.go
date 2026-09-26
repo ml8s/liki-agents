@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -38,7 +39,7 @@ func main() {
 	}
 }
 
-func run() error {
+func run() (err error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -61,7 +62,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer store.Close()
+	defer func() {
+		if closeErr := store.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close audit database: %w", closeErr)
+		}
+	}()
 	deployment, err := agentruntime.LoadAgentDeployment(cfg.DeploymentFile)
 	if err != nil {
 		return err

@@ -17,9 +17,8 @@ observability.
 
 ## Install
 
-Requires Go 1.26+, Docker Compose for container development, and Node.js 18+
-for documentation checks. Clone the repository and run `make build`; the binary
-is written to `bin/liki-agents`.
+Requires Go 1.26+, Node.js 22+, Docker Compose, and golangci-lint 2.x. Clone
+the repository and run `make build`; the binary is written to `bin/liki-agents`.
 
 ## Quick start
 
@@ -33,10 +32,9 @@ curl -sS http://127.0.0.1:8083/readyz | jq
 ```
 
 `make run` starts only the runtime; MCP servers are external dependencies.
-`make dev` builds and starts the development Agent plus the Engine and Counsel
-MCP fixtures in Compose. For browser-style local testing, run
-`scripts/dev-chat-ui.sh` and open <http://127.0.0.1:8084>. That UI is
-development-only.
+`make dev` starts the Agent and MCP fixtures, loading `.env` when present. For
+browser-style testing, run `scripts/dev-chat-ui.sh` and open
+<http://127.0.0.1:8084>; that UI is development-only.
 
 ## Runtime model
 
@@ -67,7 +65,8 @@ semantics.
 | Machine discovery | A2A Agent Card | `GET /.well-known/agent-card.json` | standard capability metadata |
 | Tool server | MCP Streamable HTTP | outbound | deterministic tools |
 
-Operational endpoints are `/readyz`, `/version`, and `/metrics`.
+Operational endpoints are public `/readyz` and `/version`, plus `/metrics`.
+When an internal service token is configured, `/metrics` requires that token.
 There is no private application API and no ADK Launcher control plane.
 
 ## Security boundary
@@ -85,15 +84,18 @@ inject:
 X-Liki-User-ID: <verified user id>
 ```
 
-The runtime does not expose itself directly to the public internet, authenticate
-end users, issue sessions, store product conversations, or trust unverified
-browser identities.
+The runtime is never directly public and never authenticates end users, issues
+sessions, stores product conversations, or trusts unverified browser identities.
 
 Local development may leave `LIKI_AGENTS_INTERNAL_TOKEN` empty. Bearer
 authentication is then disabled, but AG-UI still requires `X-Liki-User-ID`.
+Invalid bearer or identity attempts are limited per socket source; repeated
+failures return HTTP 429 with the stable `rate_limited` code.
 
-MCP access is allowlisted per Agent and per server. Logs, traces, and audit
-records do not contain prompts, raw model output, or tool payloads.
+MCP access is allowlisted per Agent and server. Evidence never contains prompts,
+raw model output, or tool payloads. Outside development, the deployment digest
+is mandatory, the LLM endpoint is HTTPS-only, and configured URLs cannot embed
+credentials.
 
 ## Configuration
 
@@ -114,15 +116,15 @@ own service prefixes (`/engine/mcp`, `/counsel/mcp/bazi`) while direct
 service-network URLs use the MCP service paths (`/mcp`, `/mcp/bazi`). The
 runtime does not rewrite MCP paths or add private protocol headers.
 
-Use an empty `LIKI_LLM_STRUCTURED_OUTPUT` for plain-text deployments;
-`json_schema` and `json_object` are provider-specific strict/JSON modes.
+Use empty `LIKI_LLM_STRUCTURED_OUTPUT` for plain text; `json_schema` and
+`json_object` select provider modes. Concurrency is bounded to 1–1024, while
+development alone permits local HTTP LLMs and an unpinned deployment digest.
 
 ## Operations
 
-Use `make run` for the host process and `make dev` for the containerized
-development service and MCP fixtures. `make dev-down` removes the Compose
-workload; `make db-backup` creates an online SQLite backup.
-The current runtime supports one process/replica; see
+Use `make run` for the host process and `make dev` for Compose. `make dev-down`
+removes the workload and `make db-backup` creates an online SQLite backup. The
+runtime supports one process/replica; see
 [`docs/STANDARDS.md`](docs/STANDARDS.md) for the prerequisites for scaling it.
 
 ## Observability
@@ -138,8 +140,10 @@ OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://otel-collector:4318/v1/traces
 ```
 
 SQLite stores append-only audit events with execution metadata, versions,
-digests, duration, and stable error codes. Audit records do not store
-conversation or domain payloads.
+digests, duration, and stable error codes. On startup, the single-process
+runtime closes interrupted run, model, tool, and delegation lifecycles with
+synthetic `runtime_interrupted` failures; it never resumes execution or edits
+historical evidence. Audit records do not store conversation or domain payloads.
 
 ## Documentation
 
@@ -154,19 +158,12 @@ conversation or domain payloads.
 
 ## Development
 
-Run static checks, artifact validation, race tests, and build:
-
-```bash
-make check
-make validate
-make test
-make gate
-make build
-```
+Run `make check`, `make validate`, `make test`, `make gate`, and `make build`.
 
 `make gate` is the pre-push gate. It runs documentation linting, Go static
-checks, isolated race tests, and deployment validation. It does not call a real
-model provider or external MCP.
+checks, `golangci-lint`, isolated race tests, and deployment validation. It does
+not call a real model provider or external MCP. CI additionally runs
+`govulncheck`, `npm audit`, binary and Docker image builds.
 
 ## Project boundary
 

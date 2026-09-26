@@ -19,7 +19,11 @@ func TestAuditEventRepositoryAppendsImmutableEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	defer store.Close()
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close sqlite: %v", err)
+		}
+	})
 
 	recorder := NewAuditEventRepository(store.GORM())
 	ctx := context.Background()
@@ -104,7 +108,11 @@ func TestAuditEventRepositoryRejectsInvalidEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	defer store.Close()
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close sqlite: %v", err)
+		}
+	})
 
 	recorder := NewAuditEventRepository(store.GORM())
 	err = recorder.Record(context.Background(), nil)
@@ -131,7 +139,11 @@ func TestAuditEventRepositoryPreservesProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	defer store.Close()
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close sqlite: %v", err)
+		}
+	})
 
 	recorder := NewAuditEventRepository(store.GORM())
 	event := audit.Event{
@@ -184,5 +196,244 @@ func TestAuditEventRepositoryPreservesProvenance(t *testing.T) {
 	}
 	if !strings.Contains(stored.PayloadJSON, "sha256:output") {
 		t.Fatalf("stored payload = %q", stored.PayloadJSON)
+	}
+}
+
+func TestAuditEventRepositoryRecoversInterruptedEvents(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "agent-audit.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close sqlite: %v", err)
+		}
+	})
+
+	recorder := NewAuditEventRepository(store.GORM())
+	ctx := context.Background()
+	occurred := time.Date(2026, 9, 26, 8, 0, 0, 0, time.UTC)
+	startedEvents := []audit.Event{
+		{
+			ID: "run_1:run.started", SchemaVersion: audit.SchemaV1,
+			Type: audit.EventRunStarted, OccurredAt: occurred,
+			RootRunID: "run_1", RunID: "run_1", ThreadID: "thread_1",
+			UserID: "user_1", Protocol: "ag_ui", AgentName: "coordinator",
+			Status: audit.StatusRunning,
+		},
+		{
+			ID: "call_1:llm.call.started", SchemaVersion: audit.SchemaV1,
+			Type: audit.EventLLMCallStarted, OccurredAt: occurred,
+			RootRunID: "run_1", RunID: "run_1", ThreadID: "thread_1",
+			UserID: "user_1", Protocol: "ag_ui", AgentName: "coordinator",
+			Model: "test-model", Provider: "test", Status: audit.StatusRunning,
+		},
+		{
+			ID: "run_1/coordinator/call_1:tool.call.started", SchemaVersion: audit.SchemaV1,
+			Type: audit.EventToolCallStarted, OccurredAt: occurred,
+			RootRunID: "run_1", RunID: "run_1", ThreadID: "thread_1",
+			UserID: "user_1", Protocol: "ag_ui", AgentName: "coordinator",
+			ToolCallID: "call_1", ToolName: "test_tool", Status: audit.StatusRunning,
+		},
+		{
+			ID: "run_1/coordinator/worker:agent.delegation.started", SchemaVersion: audit.SchemaV1,
+			Type: audit.EventDelegationStarted, OccurredAt: occurred,
+			RootRunID: "run_1", RunID: "run_1", ThreadID: "thread_1",
+			UserID: "user_1", Protocol: "ag_ui", CallerAgent: "coordinator",
+			TargetAgent: "worker", Status: audit.StatusRunning,
+		},
+	}
+	for index := range startedEvents {
+		if err := recorder.Record(ctx, &startedEvents[index]); err != nil {
+			t.Fatalf("Record(started %d) error = %v", index, err)
+		}
+	}
+
+	recoveryTime := occurred.Add(5 * time.Second)
+	if err := recorder.RecoverInterrupted(ctx, recoveryTime); err != nil {
+		t.Fatalf("RecoverInterrupted() error = %v", err)
+	}
+	if err := recorder.RecoverInterrupted(ctx, recoveryTime.Add(time.Second)); err != nil {
+		t.Fatalf("idempotent RecoverInterrupted() error = %v", err)
+	}
+
+	expected := map[string]string{
+		"run_1:run.started":                                 "run_1:run.failed",
+		"call_1:llm.call.started":                           "call_1:llm.call.failed",
+		"run_1/coordinator/call_1:tool.call.started":        "run_1/coordinator/call_1:tool.call.failed",
+		"run_1/coordinator/worker:agent.delegation.started": "run_1/coordinator/worker:agent.delegation.failed",
+	}
+	var count int64
+	if err := store.GORM().Table("agent_audit_events").Count(&count).Error; err != nil {
+		t.Fatalf("count audit events: %v", err)
+	}
+	if count != int64(len(startedEvents)*2) {
+		t.Fatalf("event count after recovery = %d, want %d", count, len(startedEvents)*2)
+	}
+	for originalID, failedID := range expected {
+		var stored struct {
+			EventType    string
+			OccurredAt   time.Time
+			Status       string
+			DurationMS   int64
+			ErrorCode    string
+			ErrorMessage string
+			PayloadJSON  string
+		}
+		if err := store.GORM().Table("agent_audit_events").
+			Select("event_type", "occurred_at", "status", "duration_ms", "error_code", "error_message", "payload_json").
+			Where("id = ?", failedID).
+			Scan(&stored).Error; err != nil {
+			t.Fatalf("read recovered event %q: %v", failedID, err)
+		}
+		if stored.Status != string(audit.StatusFailed) ||
+			stored.DurationMS != 5000 ||
+			stored.ErrorCode != domain.CodeRuntimeInterrupted {
+			t.Fatalf("recovered %q = %+v", failedID, stored)
+		}
+		if !strings.Contains(stored.PayloadJSON, `"recovery":"startup"`) ||
+			!strings.Contains(stored.PayloadJSON, `"original_event_id":"`+originalID+`"`) {
+			t.Fatalf("recovered %q payload = %q", failedID, stored.PayloadJSON)
+		}
+	}
+}
+
+func TestAuditEventRepositoryRecoveryRespectsExistingTerminalEvidence(t *testing.T) {
+	lifecycles := []struct {
+		started   audit.Event
+		completed audit.Event
+	}{
+		{
+			started: audit.Event{
+				ID: "run_1:run.started", SchemaVersion: audit.SchemaV1,
+				Type: audit.EventRunStarted, OccurredAt: time.Now().UTC(),
+				RootRunID: "run_1", RunID: "run_1", Status: audit.StatusRunning,
+			},
+		},
+		{
+			started: audit.Event{
+				ID: "call_1:llm.call.started", SchemaVersion: audit.SchemaV1,
+				Type: audit.EventLLMCallStarted, OccurredAt: time.Now().UTC(),
+				RootRunID: "run_1", RunID: "run_1", AgentName: "coordinator",
+				Model: "test-model", Status: audit.StatusRunning,
+			},
+		},
+		{
+			started: audit.Event{
+				ID: "run_1/coordinator/call_1:tool.call.started", SchemaVersion: audit.SchemaV1,
+				Type: audit.EventToolCallStarted, OccurredAt: time.Now().UTC(),
+				RootRunID: "run_1", RunID: "run_1", ToolCallID: "call_1",
+				ToolName: "test_tool", Status: audit.StatusRunning,
+			},
+		},
+		{
+			started: audit.Event{
+				ID: "run_1/coordinator/worker:agent.delegation.started", SchemaVersion: audit.SchemaV1,
+				Type: audit.EventDelegationStarted, OccurredAt: time.Now().UTC(),
+				RootRunID: "run_1", RunID: "run_1", CallerAgent: "coordinator",
+				TargetAgent: "worker", Status: audit.StatusRunning,
+			},
+		},
+	}
+
+	for _, lifecycle := range lifecycles {
+		t.Run(string(lifecycle.started.Type), func(t *testing.T) {
+			store, err := Open(filepath.Join(t.TempDir(), "agent-audit.db"))
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			t.Cleanup(func() {
+				if err := store.Close(); err != nil {
+					t.Errorf("close sqlite: %v", err)
+				}
+			})
+			recorder := NewAuditEventRepository(store.GORM())
+			ctx := context.Background()
+			if err := recorder.Record(ctx, &lifecycle.started); err != nil {
+				t.Fatalf("Record(started) error = %v", err)
+			}
+
+			completed := lifecycle.started
+			base := strings.TrimSuffix(completed.ID, ":"+string(completed.Type))
+			completedType := strings.Replace(string(completed.Type), ".started", ".completed", 1)
+			completed.ID = base + ":" + completedType
+			completed.Type = audit.EventType(completedType)
+			completed.OccurredAt = completed.OccurredAt.Add(time.Second)
+			completed.Status = audit.StatusSucceeded
+			completed.DurationMS = 1000
+			if err := recorder.Record(ctx, &completed); err != nil {
+				t.Fatalf("Record(completed) error = %v", err)
+			}
+
+			if err := recorder.RecoverInterrupted(ctx, completed.OccurredAt.Add(time.Second)); err != nil {
+				t.Fatalf("RecoverInterrupted() error = %v", err)
+			}
+			var failed int64
+			if err := store.GORM().Table("agent_audit_events").
+				Where("status = ?", string(audit.StatusFailed)).
+				Count(&failed).Error; err != nil {
+				t.Fatalf("count failed events: %v", err)
+			}
+			if failed != 0 {
+				t.Fatalf("recovery invented %d terminal failures", failed)
+			}
+		})
+	}
+}
+
+func TestAuditEventRepositoryRecoveryFailsClosed(t *testing.T) {
+	tests := []struct {
+		name       string
+		eventID    string
+		recoverAt  func(time.Time) time.Time
+		wantErrStr string
+	}{
+		{
+			name:       "malformed lifecycle ID",
+			eventID:    "legacy-started",
+			recoverAt:  func(occurred time.Time) time.Time { return occurred.Add(time.Second) },
+			wantErrStr: "stable lifecycle ID contract",
+		},
+		{
+			name:       "clock moved backwards",
+			eventID:    "run_1:run.started",
+			recoverAt:  func(occurred time.Time) time.Time { return occurred.Add(-time.Second) },
+			wantErrStr: "recovery timestamp precedes",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, err := Open(filepath.Join(t.TempDir(), "agent-audit.db"))
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			t.Cleanup(func() {
+				if err := store.Close(); err != nil {
+					t.Errorf("close sqlite: %v", err)
+				}
+			})
+			occurred := time.Date(2026, 9, 26, 9, 0, 0, 0, time.UTC)
+			event := audit.Event{
+				ID: test.eventID, SchemaVersion: audit.SchemaV1,
+				Type: audit.EventRunStarted, OccurredAt: occurred,
+				RootRunID: "run_1", RunID: "run_1", Status: audit.StatusRunning,
+			}
+			recorder := NewAuditEventRepository(store.GORM())
+			if err := recorder.Record(context.Background(), &event); err != nil {
+				t.Fatalf("Record(started) error = %v", err)
+			}
+
+			err = recorder.RecoverInterrupted(context.Background(), test.recoverAt(occurred))
+			if err == nil || !strings.Contains(err.Error(), test.wantErrStr) {
+				t.Fatalf("RecoverInterrupted() error = %v, want %q", err, test.wantErrStr)
+			}
+			var count int64
+			if err := store.GORM().Table("agent_audit_events").Count(&count).Error; err != nil {
+				t.Fatalf("count audit events: %v", err)
+			}
+			if count != 1 {
+				t.Fatalf("event count after failed recovery = %d, want unchanged 1", count)
+			}
+		})
 	}
 }

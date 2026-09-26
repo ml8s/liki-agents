@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -22,8 +21,6 @@ import (
 )
 
 type recordingAuditEvents struct {
-	mu     sync.Mutex
-	events []audit.Event
 }
 
 func (r *recordingAuditEvents) Record(_ context.Context, event *audit.Event) error {

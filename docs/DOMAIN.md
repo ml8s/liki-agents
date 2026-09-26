@@ -40,8 +40,8 @@ skill/project.
 7. `RunResult.Output` is generic validated JSON for structured Agents.
 8. `RunResult.Text` is final model text for plain Agents or the configured
    JSON Pointer value for structured Agents.
-9. Failed runs mark pending tool executions as interrupted so every tool has a
-   terminal audit event.
+9. Failed runs mark pending executions and delegations as interrupted so every
+   lifecycle has terminal audit evidence.
 
 ## Audit invariants
 
@@ -50,10 +50,14 @@ skill/project.
 3. Every model call has started and terminal lifecycle evidence.
 4. Every tool call has started and terminal lifecycle evidence, including
    interrupted calls.
-5. Audit records protocol, trace correlation, version, and digest provenance,
+5. Every delegation has started and terminal lifecycle evidence, including
+   interrupted delegations.
+6. A hard interruption is represented at startup by an append-only synthetic
+   `runtime_interrupted` terminal failure, never by editing an old event.
+7. Audit records protocol, trace correlation, version, and digest provenance,
    but not secrets, prompts, raw model output, or tool payloads.
-6. Audit write failures fail closed; cancellation does not prevent terminal
-   audit events.
+8. Audit write and recovery failures fail closed; cancellation does not prevent
+   terminal audit events.
 
 ## Ownership boundary
 

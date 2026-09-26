@@ -1,7 +1,7 @@
 services:
   engine-mcp:
     image: liki-engine:latest
-    entrypoint: ["/usr/local/bin/liki-mcp", "--addr", ":8085"]
+    entrypoint: ["/usr/local/bin/engine-mcp", "--addr", ":8085"]
     profiles: ["mcp"]
     expose: ["8085"]
     environment:
@@ -35,7 +35,7 @@ services:
   liki-agents:
     image: liki-agents:latest
     build:
-      context: ..
+      context: .
       dockerfile: Dockerfile
       args:
         VERSION: ${LIKI_AGENTS_VERSION:-dev}

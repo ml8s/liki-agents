@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ml8s/liki-agents/internal/domain"
 	"github.com/ml8s/liki-agents/internal/observability"
 	"github.com/ml8s/liki-agents/internal/platform"
 	"github.com/ml8s/liki-agents/internal/transport"
@@ -118,6 +119,91 @@ func TestOperationalEndpoints(t *testing.T) {
 		if response.Code != http.StatusOK {
 			t.Fatalf("%s status = %d", path, response.Code)
 		}
+	}
+}
+
+func TestMetricsRequiresServiceToken(t *testing.T) {
+	handler := mustNewServer(t, transport.Services{
+		AgentCard:     http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
+		A2A:           http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }),
+		AGUI:          http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }),
+		MetricsTarget: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) }),
+		InternalToken: "secret",
+	})
+
+	unauthenticated := httptest.NewRecorder()
+	handler.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated metrics status = %d", unauthenticated.Code)
+	}
+
+	authenticated := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	authenticated.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, authenticated)
+	if response.Code != http.StatusTeapot {
+		t.Fatalf("authenticated metrics status = %d", response.Code)
+	}
+}
+
+func TestAuthenticationFailuresAreRateLimitedByRemoteSource(t *testing.T) {
+	handler := newServer(t, "secret")
+	request := func(remoteAddr string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/a2a", strings.NewReader(`{}`))
+		request.RemoteAddr = remoteAddr
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+
+	for attempt := 1; attempt <= 10; attempt++ {
+		if response := request("192.0.2.10:12345"); response.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d, want %d", attempt, response.Code, http.StatusUnauthorized)
+		}
+	}
+	blocked := request("192.0.2.10:54321")
+	if blocked.Code != http.StatusTooManyRequests || !strings.Contains(blocked.Body.String(), domain.CodeRateLimited) {
+		t.Fatalf("blocked response = %d %s", blocked.Code, blocked.Body.String())
+	}
+
+	// Forwarded headers are untrusted and must not bypass the socket source.
+	forwarded := httptest.NewRequest(http.MethodPost, "/a2a", strings.NewReader(`{}`))
+	forwarded.RemoteAddr = "192.0.2.10:12345"
+	forwarded.Header.Set("X-Forwarded-For", "198.51.100.1")
+	forwardedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(forwardedResponse, forwarded)
+	if forwardedResponse.Code != http.StatusTooManyRequests {
+		t.Fatalf("forwarded source status = %d, want %d", forwardedResponse.Code, http.StatusTooManyRequests)
+	}
+
+	otherSource := httptest.NewRequest(http.MethodPost, "/a2a", strings.NewReader(`{}`))
+	otherSource.RemoteAddr = "198.51.100.1:12345"
+	otherSource.Header.Set("Authorization", "Bearer secret")
+	otherResponse := httptest.NewRecorder()
+	handler.ServeHTTP(otherResponse, otherSource)
+	if otherResponse.Code != http.StatusAccepted {
+		t.Fatalf("other source status = %d", otherResponse.Code)
+	}
+}
+
+func TestIdentityFailuresAreRateLimitedWithoutServiceToken(t *testing.T) {
+	handler := newServer(t, "")
+	for attempt := 1; attempt <= 10; attempt++ {
+		request := httptest.NewRequest(http.MethodPost, "/ag-ui", strings.NewReader(`{}`))
+		request.RemoteAddr = "198.51.100.10:12345"
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d, want %d", attempt, response.Code, http.StatusUnauthorized)
+		}
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/ag-ui", strings.NewReader(`{}`))
+	request.RemoteAddr = "198.51.100.10:54321"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusTooManyRequests || !strings.Contains(response.Body.String(), domain.CodeRateLimited) {
+		t.Fatalf("blocked response = %d %s", response.Code, response.Body.String())
 	}
 }
 

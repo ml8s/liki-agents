@@ -167,8 +167,14 @@ prompts, raw model output, or tool payloads.
 
 ## Operations
 
-Version, readiness, and metrics are standard transport endpoints. All
-POST endpoints enforce a 2 MB body limit.
+Version and readiness are public standard transport endpoints. Metrics use the
+same bearer-token boundary as protocol calls whenever an internal token is
+configured. All POST endpoints enforce a 2 MB body limit.
+
+Bearer-token failures and missing verified identities are counted in a bounded
+fixed window per TCP socket source. Untrusted forwarding headers never change
+the source. A source that exceeds ten failures in one minute receives HTTP 429
+and the stable `rate_limited` code.
 
 Readiness checks SQLite and every declared MCP dependency through the official
 MCP discovery RPC. It requires the configured MCP revision, server identity,
@@ -183,8 +189,15 @@ raw model output, or tool payloads.
 
 Audit events are append-only SQLite records. They contain execution metadata,
 protocol, trace correlation, agent and deployment digests, versions, status,
-duration, and error codes—not conversation or domain payloads. In-flight runs
-are not recoverable after crash; clients start a new run.
+duration, and error codes—not conversation or domain payloads.
+
+Before accepting traffic, the single-process runtime transactionally finds
+started run, LLM, tool, and delegation events without terminal evidence and
+appends synthetic failures coded `runtime_interrupted`. Recovery uses stable
+lifecycle IDs, preserves original provenance, is idempotent, and never updates
+or deletes history. Execution is still not resumed after a crash; clients start
+a new run. The `multi` topology remains fail-closed until audit ownership is
+transactional across replicas.
 
 ## Observability and audit implementation
 

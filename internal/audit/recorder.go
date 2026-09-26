@@ -1,8 +1,11 @@
 package audit
 
-import "context"
+import (
+	"context"
+	"time"
 
-import "github.com/ml8s/liki-agents/internal/domain"
+	"github.com/ml8s/liki-agents/internal/domain"
+)
 
 // Recorder persists immutable audit facts. Implementations must treat Record
 // as append-only: an event must never overwrite or remove a prior event.
@@ -14,4 +17,11 @@ type Recorder interface {
 // idempotency after process restart or in-memory registry eviction.
 type RunExistenceChecker interface {
 	RunExists(ctx context.Context, runID domain.ID) (bool, error)
+}
+
+// InterruptionRecoverer is an optional recorder capability for closing audit
+// lifecycles left running by a hard process interruption. Recovery is strictly
+// append-only: existing evidence is never rewritten.
+type InterruptionRecoverer interface {
+	RecoverInterrupted(ctx context.Context, now time.Time) error
 }
