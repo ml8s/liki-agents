@@ -1,3 +1,12 @@
+# 统一语义（四仓一致）：
+#   make lint   静态检查聚合
+#   make check  纯静态契约检查（lint+格式+vet+validate；不跑测试、不写盘）
+#   make test   本仓全部测试（单元/集成；不含 e2e）
+#   make gate   check + test ＝ 推送门槛
+#   make build  本仓产物（liki-agents 二进制；镜像由 CI release 构建）
+#   make image  本地镜像（调试用，非发布路径）
+#   make e2e    系统 E2E 聚合（liki-deploy 编排）
+
 GO ?= go
 NPM ?= npm
 VERSION ?= $(shell git describe --tags --always --dirty --match "v*" 2>/dev/null || echo dev)
@@ -8,7 +17,7 @@ LDFLAGS ?= -s -w -X github.com/ml8s/liki-agents/internal/platform/buildinfo.Vers
 TEST_PACKAGES ?= ./...
 COMPOSE_ENV_FILE := $(if $(wildcard .env),--env-file .env)
 
-.PHONY: help fmt fmt-check vet lint-engine lint-readme test check test-db db-backup db-verify build run dev dev-down validate gate smoke
+.PHONY: help fmt fmt-check vet lint-engine lint-readme test check test-db db-backup db-verify build run dev dev-down validate gate image
 help:
 	@echo "make check    - static checks: docs, formatting, lint, vet, and artifact"
 	@echo "make lint-readme - lint and test developer documentation"
@@ -18,6 +27,7 @@ help:
 	@echo "make db-backup - create an online SQLite backup"
 	@echo "make db-verify - verify the latest SQLite backup"
 	@echo "make build    - build ./bin/liki-agents"
+	@echo "make image    - build the liki-agents Docker image locally (debug; CI builds for release)"
 	@echo "make dev      - run the development Agent and MCP containers in the foreground"
 	@echo "make dev-down - remove the development Agent workload"
 	@echo "make validate - validate the AgentDeployment artifact without starting the server"
@@ -61,15 +71,22 @@ db-verify:
 		if [ -z "$$LATEST" ]; then echo "no backup found" >&2; exit 1; fi; \
 		sqlite3 "$$LATEST" "PRAGMA integrity_check;"'
 
-build:
+build: ## Build the local liki-agents binary. 镜像由 CI release 构建，非本地。
 	$(GO) build -trimpath -buildvcs=false -ldflags="$(LDFLAGS)" -o bin/liki-agents ./cmd/liki-agents
+
+# ── 镜像（本地调试用，非发布路径）──
+# 生产镜像由 CI release 构建并推送 GHCR；此目标仅用于本地构建/调试。
+IMAGE_REGISTRY ?= ghcr.io/ml8s
+IMAGE_TAG ?= dev
+
+image: ## Build liki-agents image locally (debug; production uses CI release)
+	docker build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
+		-t $(IMAGE_REGISTRY)/liki-agents:$(IMAGE_TAG) .
 
 run:
 	./scripts/dev.sh
 
 gate: check test
-
-smoke: build
 
 validate:
 	@$(GO) run ./cmd/liki-agents validate -deployment $(if $(LIKI_AGENTS_DEPLOYMENT_FILE),$(LIKI_AGENTS_DEPLOYMENT_FILE),./dev/agent-deployment/deployment.json)
