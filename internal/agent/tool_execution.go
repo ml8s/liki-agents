@@ -85,6 +85,9 @@ func (a *ToolExecutionAuditor) BeforeTool(
 	tool tool.Tool,
 	args map[string]any,
 ) (map[string]any, error) {
+	if tool != nil && tool.Name() == adkTransferToolName {
+		return nil, nil
+	}
 	if ctx == nil || tool == nil {
 		return args, domain.NewError(domain.CodeToolCallInvalid, "tool callback context and tool are required", nil)
 	}
@@ -113,6 +116,9 @@ func (a *ToolExecutionAuditor) AfterTool(
 	result map[string]any,
 	err error,
 ) (map[string]any, error) {
+	if tool != nil && tool.Name() == adkTransferToolName {
+		return result, nil
+	}
 	if ctx == nil || tool == nil {
 		return result, domain.NewError(domain.CodeToolCallInvalid, "tool callback context and tool are required", nil)
 	}

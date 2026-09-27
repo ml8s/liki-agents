@@ -156,6 +156,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		finished.Result = map[string]any{
 			"definition": result.Definition,
 			"output":     json.RawMessage(result.Output),
+			"answer":     result.Text,
 		}
 		if err := streamer.emitRunFinished(finished, emit); err != nil {
 			runErr = err

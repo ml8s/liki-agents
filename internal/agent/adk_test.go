@@ -52,6 +52,9 @@ func TestAgentDefinitionCompilesToStandardADKConfig(t *testing.T) {
 	if config.Mode != llmagent.ModeTask || config.Instruction != "generic instruction" {
 		t.Fatalf("mode/instruction = %v/%q", config.Mode, config.Instruction)
 	}
+	if config.InstructionProvider == nil {
+		t.Fatal("instruction provider is required so literal JSON braces are not state placeholders")
+	}
 	if config.Model != nil || len(config.SubAgents) != 1 {
 		t.Fatalf("runtime dependencies = %#v", config)
 	}

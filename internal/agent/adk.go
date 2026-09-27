@@ -8,6 +8,10 @@ import (
 	"google.golang.org/genai"
 )
 
+// adkTransferToolName is ADK's built-in delegation tool. It is not an MCP tool
+// and is audited through Agent lifecycle callbacks rather than tool provenance.
+const adkTransferToolName = "transfer_to_agent"
+
 // ADKAgentRuntime carries the shared runtime objects that are intentionally
 // outside the deployment artifact. The artifact never contains credentials,
 // model clients, callbacks, or MCP transports.
@@ -39,11 +43,14 @@ func (a *AgentDefinition) ADKConfig(runtime ADKAgentRuntime) llmagent.Config {
 		}, beforeModelCallbacks...)
 	}
 	return llmagent.Config{
-		Name:                     a.Name,
-		Description:              a.Description,
-		Mode:                     adkMode(a.Mode),
-		Model:                    runtime.Model,
-		Instruction:              a.InstructionText,
+		Name:        a.Name,
+		Description: a.Description,
+		Mode:        adkMode(a.Mode),
+		Model:       runtime.Model,
+		Instruction: a.InstructionText,
+		InstructionProvider: func(_ agent.ReadonlyContext) (string, error) {
+			return a.InstructionText, nil
+		},
 		SubAgents:                runtime.SubAgents,
 		Toolsets:                 runtime.Toolsets,
 		BeforeModelCallbacks:     beforeModelCallbacks,

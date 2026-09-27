@@ -14,10 +14,9 @@ import (
 )
 
 type runState struct {
-	output         OutputResult
-	capturePlain   bool
-	plainAgentName string
-	tools          toolNameTracker
+	output       OutputResult
+	capturePlain bool
+	tools        toolNameTracker
 }
 
 type OutputResult struct {
@@ -59,8 +58,10 @@ func (t *toolNameTracker) Names() []string {
 
 func (s *runState) consume(event *session.Event) {
 	s.tools.consume(event)
-	if !s.capturePlain || event == nil || event.Partial ||
-		event.Author != s.plainAgentName || !event.IsFinalResponse() {
+	// A delegated plain-text agent authors the user-facing final answer even
+	// though the entrypoint remains the deployment's root. Capture the last
+	// terminal model response across the delegated tree.
+	if !s.capturePlain || event == nil || event.Partial || !event.IsFinalResponse() {
 		return
 	}
 	if event.Content == nil {
@@ -91,6 +92,13 @@ func (s *runState) consumeStructuredOutput(value any, definition *AgentDefinitio
 // structured-output state. Every protocol receives the same validation,
 // canonical JSON, and user-facing pointer text.
 func ParseStructuredOutput(value any, definition *AgentDefinition) (OutputResult, error) {
+	if definition == nil || definition.ResolvedOutput == nil {
+		return OutputResult{}, domain.NewError(
+			domain.CodeStructuredOutputInvalid,
+			"structured output schema is not configured",
+			nil,
+		)
+	}
 	var document any
 	switch typed := value.(type) {
 	case string:

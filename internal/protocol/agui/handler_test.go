@@ -241,6 +241,9 @@ func TestAGUIEmitsStructuredAnswerAsTextLifecycle(t *testing.T) {
 		}
 		last = index
 	}
+	if !strings.Contains(body, `"answer":"结构化答案"`) {
+		t.Fatalf("RUN_FINISHED result missing authoritative answer: %s", body)
+	}
 }
 
 func TestAGUISuppressesRunErrorOnClientDisconnect(t *testing.T) {

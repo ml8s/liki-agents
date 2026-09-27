@@ -74,7 +74,7 @@ func testDeployment(t testing.TB) (*Deployment, error) {
 
 func TestRunStateRejectsInvalidStructuredOutput(t *testing.T) {
 	state := &runState{}
-	deployment := NewTestDeployment(t)
+	deployment := plainTestDeployment(t)
 	entrypoint, err := deployment.EntrypointDefinition()
 	if err != nil {
 		t.Fatal(err)
@@ -117,6 +117,21 @@ func TestEventProjectorFiltersObserverFacts(t *testing.T) {
 				t.Fatalf("visible event = %+v/%v, want one function call", visible, visibleOK)
 			}
 		})
+	}
+}
+
+func TestRunStateCapturesDelegatedPlainFinalAnswer(t *testing.T) {
+	state := &runState{capturePlain: true}
+	event := &session.Event{
+		Author: "bazi",
+		LLMResponse: model.LLMResponse{
+			TurnComplete: true,
+			Content:      genai.NewContentFromText("delegated answer", genai.RoleModel),
+		},
+	}
+	state.consume(event)
+	if state.output.Text != "delegated answer" {
+		t.Fatalf("output text = %q", state.output.Text)
 	}
 }
 

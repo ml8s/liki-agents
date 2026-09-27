@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -115,6 +116,26 @@ func TestToolAuditorRejectsToolOutsideAgentAllowlist(t *testing.T) {
 	}
 	if got := len(events.eventsOfType(audit.EventToolCallStarted)); got != 0 {
 		t.Fatalf("unauthorized tool audit events = %d, want 0", got)
+	}
+}
+
+func TestToolAuditorSkipsBuiltInADKTransferTool(t *testing.T) {
+	auditor, events, metrics, ctx := newToolAuditor(t)
+	args := map[string]any{"agent_name": "sub"}
+	replacement, err := auditor.BeforeTool(ctx, fakeTool(adkTransferToolName), args)
+	if err != nil || replacement != nil {
+		t.Fatalf("BeforeTool() = %#v, %v, want no replacement", replacement, err)
+	}
+	result := map[string]any{"status": "transferred"}
+	got, err := auditor.AfterTool(ctx, fakeTool(adkTransferToolName), args, result, nil)
+	if err != nil || !reflect.DeepEqual(got, result) {
+		t.Fatalf("AfterTool() = %#v, %v, want original delegation result", got, err)
+	}
+	if len(events.events) != 0 {
+		t.Fatalf("built-in delegation emitted MCP tool audit events: %+v", events.events)
+	}
+	if len(metrics.calls) != 0 {
+		t.Fatalf("built-in delegation emitted MCP tool metrics: %v", metrics.calls)
 	}
 }
 

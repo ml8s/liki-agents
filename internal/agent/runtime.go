@@ -699,8 +699,7 @@ func (r *Runtime) Run(
 	defer runSpan.End()
 	startedAt := r.config.Now()
 	state := &runState{
-		capturePlain:   !r.entrypoint.Output.Structured(),
-		plainAgentName: r.entrypoint.Name,
+		capturePlain: !r.entrypoint.Output.Structured(),
 	}
 	projector := newEventProjector(r.definition)
 	// Session identity is run-scoped. Thread identity remains owned by the
@@ -806,7 +805,7 @@ func (r *Runtime) Run(
 			runSpan.SetStatus(codes.Error, runtimeError(err).Error())
 			r.config.Logger.WarnContext(ctx, "agent_run_failed",
 				append(traceLogFields(ctx),
-					"run_id", request.RunID, "error", runtimeError(err).Error(),
+					"run_id", request.RunID, "error", runtimeError(err).Error(), "cause", err.Error(),
 				)...)
 			runErr = runtimeError(err)
 			return RunResult{}, runErr
