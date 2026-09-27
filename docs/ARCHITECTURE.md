@@ -35,6 +35,10 @@ incoming-edge-free Agent is the entrypoint. Each Agent definition supplies:
 - version.
 
 Prompt, output schema, and tool semantics are not built into Go.
+Instructions are installed through ADK's `InstructionProvider` path because
+AgentDeployment prompts are immutable text artifacts and may contain literal
+JSON/code braces. ADK must not interpret those braces as session-state
+placeholders.
 The manifest is validated against the canonical JSON Schema 2020-12 contract
 before graph and file semantics are evaluated.
 The deployment digest covers the manifest plus resolved instruction and output
@@ -111,11 +115,16 @@ MCP tools are consumed through MCP Streamable HTTP and filtered by the
 server-scoped AgentDefinition allowlist. Tool calls and responses become
 protocol facts and execution evidence; model assertions do not create tool
 provenance.
+ADK's built-in `transfer_to_agent` call is not an MCP tool. It remains visible
+on AG-UI as a tool event and is audited through Agent delegation lifecycle
+events rather than MCP tool provenance.
 
 Raw structured model output is not emitted to protocol observers. Partial
 events are suppressed. A structured Agent returns validated generic JSON plus
 the user-facing text selected by its configured JSON Pointer; a plain-text
-Agent returns final model text directly. Structured output state keys are
+Agent returns final model text directly. In a delegated plain-text tree, the
+last terminal expert model response is the root user-facing answer. Structured
+output state keys are
 Agent-scoped, so delegated structured Agents cannot overwrite the entrypoint
 result.
 
@@ -158,8 +167,10 @@ Event mapping:
 | success | `RUN_FINISHED` |
 | failure | `RUN_ERROR` |
 
-`RUN_FINISHED` contains the AgentDefinition reference and validated output. A
-run never emits `RUN_ERROR` after `RUN_FINISHED`.
+`RUN_FINISHED` contains the AgentDefinition reference, validated output when
+structured output is declared, and the authoritative user-facing `answer` text
+for the Liki product profile. A run never emits `RUN_ERROR` after
+`RUN_FINISHED`.
 
 The A2A Agent Card uses curated `AgentDefinition` descriptions, mode, tool
 allowlist tags, and deployment provenance. It never includes instructions,
