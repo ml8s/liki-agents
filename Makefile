@@ -12,6 +12,7 @@ NPM ?= npm
 VERSION ?= $(shell git describe --tags --always --dirty --match "v*" 2>/dev/null || echo dev)
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD_TIME ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+GOPROXY ?= https://goproxy.cn,direct
 LDFLAGS ?= -s -w -X github.com/ml8s/liki-agents/internal/platform/buildinfo.Version=$(VERSION) -X github.com/ml8s/liki-agents/internal/platform/buildinfo.Commit=$(COMMIT) -X github.com/ml8s/liki-agents/internal/platform/buildinfo.BuildTime=$(BUILD_TIME)
 
 TEST_PACKAGES ?= ./...
@@ -81,6 +82,7 @@ IMAGE_TAG ?= dev
 
 image: ## Build liki-agents image locally (debug; production uses CI release)
 	docker build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
+		--build-arg GOPROXY=$(GOPROXY) \
 		-t $(IMAGE_REGISTRY)/liki-agents:$(IMAGE_TAG) .
 
 run:
