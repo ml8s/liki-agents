@@ -38,9 +38,9 @@ Liki 是多 Agent 命理专家系统，四仓分工：
 `contracts/agent-definition.schema.json` 是本仓**拥有并发布**的契约：
 
 - **schema 使用独立契约版本**：`contracts/agent-definition.version` 固定契约
-  SemVer；release 时推 GHCR OCI artifact
-  `ghcr.io/ml8s/liki-contracts:<contract-version>`
-- **liki 消费该契约**：liki 仓 `contracts/agent-definition.version` pin 版本+digest，生成工件时校验
+  SemVer 与 schema digest，随仓库提交发布
+- **liki 消费该契约**：liki 仓 `contracts/agent-definition.version` 同步一份
+  version+digest，生成工件时校验本地 schema digest 一致
 - 本仓 `contracts.go` 内嵌 schema，运行时加载工件时用 `jsonschema-go` 校验
 
 **发布顺序硬约束**：schema/镜像先发布（liki-agents release），liki 后发布（装配镜像 FROM + 按新 schema 生成工件）。
