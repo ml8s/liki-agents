@@ -13,8 +13,16 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags="-s -w 
 RUN mkdir -p /data && chown 65532:65532 /data
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
 COPY --from=build /out/liki-agents /liki-agents
 COPY --from=build --chown=nonroot:nonroot /data /data
+LABEL org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${COMMIT}" \
+      org.opencontainers.image.created="${BUILD_TIME}" \
+      org.opencontainers.image.title="liki-agents" \
+      org.opencontainers.image.description="Domain-neutral Liki multi-agent runtime"
 ENV LIKI_ENV=production LIKI_AGENTS_ADDR=:8083 LIKI_AGENTS_DATA_DIR=/data LIKI_LOG_FORMAT=json
 ENV LIKI_AGENTS_PUBLIC_URL=http://localhost:8083
 VOLUME ["/data"]
