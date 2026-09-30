@@ -20,7 +20,7 @@ COVER_PROFILE ?= $(CURDIR)/coverage.out
 COVER_MIN ?= 75
 COMPOSE_ENV_FILE := $(if $(wildcard .env),--env-file .env)
 
-.PHONY: help fmt fmt-check vet lint-engine lint-readme test test-coverage check test-db db-backup db-verify build run dev dev-down validate gate image
+.PHONY: help fmt fmt-check vet lint-engine lint-readme test test-coverage check check-actions test-db db-backup db-verify build run dev dev-down validate gate image
 help:
 	@echo "make check    - static checks: docs, formatting, lint, vet, and artifact"
 	@echo "make lint-readme - lint and test developer documentation"
@@ -62,7 +62,7 @@ test-coverage: test
 		echo "❌ coverage $$COV% < $(COVER_MIN)%" >&2; exit 1; \
 	fi
 
-check: lint-readme fmt-check lint-engine vet validate
+check: lint-readme fmt-check lint-engine vet validate check-actions
 
 test-db:
 	$(GO) test -race -count=1 ./internal/audit/sqlite/...
@@ -99,6 +99,9 @@ run:
 	./scripts/dev.sh
 
 gate: check test-coverage
+
+check-actions: ## Reject mutable reusable workflow/action references
+	python3 scripts/check_actions_pinned.py
 
 validate:
 	@$(GO) run ./cmd/liki-agents validate -deployment $(if $(LIKI_AGENTS_DEPLOYMENT_FILE),$(LIKI_AGENTS_DEPLOYMENT_FILE),./dev/agent-deployment/deployment.json)
