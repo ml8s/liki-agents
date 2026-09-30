@@ -33,7 +33,7 @@ const (
 	CodeToolCallUnknown        = "tool_call_unknown"
 	CodeToolProvenanceInvalid  = "tool_provenance_invalid"
 	CodeToolExecutionFailed    = "tool_execution_failed"
-	CodeToolExecutionInterrupted
+	CodeToolExecutionInterrupted = "tool_execution_interrupted"
 	CodeDelegationUnknown                 = "agent_delegation_unknown"
 	CodeDelegationFailed                  = "agent_delegation_failed"
 	CodeAuditRecorderMissing              = "audit_recorder_missing"
