@@ -47,7 +47,7 @@ Liki 是多 Agent 命理专家系统，四仓分工：
 
 ### 3.2 装配镜像（liki 侧构建，本仓是 base）
 
-liki 仓 `agents-image/Dockerfile.experts`：
+liki 仓 `assembly/Dockerfile`（按 `PROFILE` 构建两套装配镜像）：
 
 ```dockerfile
 FROM ghcr.io/ml8s/liki-agents:<base>   # 本仓 release 的显式 pin tag
@@ -57,7 +57,7 @@ ENV LIKI_AGENTS_DEPLOYMENT_DIGEST=<digest>  # CI 用本仓镜像 validate 计算
 ```
 
 - 本仓发布**纯运行时镜像**（`Dockerfile`，不打包任何工件）
-- 生产运行的是 `liki-experts` 装配镜像；`liki-agents` 只作为 base 被拉取
+- 生产运行的是 `liki-multi-expert` / `liki-single-expert` 装配镜像；`liki-agents` 只作为 base 被拉取
 - `LIKI_AGENTS_DEPLOYMENT_FILE`/`DIGEST` 由装配镜像内置，生产启动即校验工件
 
 ### 3.3 生产环境变量（deploy 注入）

@@ -50,6 +50,14 @@ func TestLoadValidConfiguration(t *testing.T) {
 	if cfg.DeploymentDigest != "sha256:"+strings.Repeat("a", 64) {
 		t.Fatalf("deployment digest = %q", cfg.DeploymentDigest)
 	}
+	t.Setenv("LIKI_AGENTS_SKILLS_ROOT", "/tmp/dev/skills")
+	cfg, err = config.Load()
+	if err != nil {
+		t.Fatalf("Load(skills root) error = %v", err)
+	}
+	if cfg.SkillsRoot != "/tmp/dev/skills" {
+		t.Fatalf("skills root = %q", cfg.SkillsRoot)
+	}
 }
 
 func TestLoadRejectsInvalidSettings(t *testing.T) {
@@ -113,6 +121,7 @@ func TestProductionConfigurationHardening(t *testing.T) {
 		{name: "public URL credentials rejected", key: "LIKI_AGENTS_PUBLIC_URL", value: "https://user:secret@agent.internal", wantErr: "LIKI_AGENTS_PUBLIC_URL must not contain embedded credentials"},
 		{name: "LLM URL credentials rejected", key: "LIKI_LLM_BASE_URL", value: "https://key:secret@model.internal/v1", wantErr: "LIKI_LLM_BASE_URL must not contain embedded credentials"},
 		{name: "concurrent runs bounded", key: "LIKI_MAX_CONCURRENT_RUNS", value: "1025", wantErr: "LIKI_MAX_CONCURRENT_RUNS must not exceed 1024"},
+		{name: "skills root outside development", key: "LIKI_AGENTS_SKILLS_ROOT", value: "/fixture/skills", wantErr: "LIKI_AGENTS_SKILLS_ROOT is allowed only in development"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

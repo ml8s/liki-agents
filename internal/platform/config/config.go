@@ -24,6 +24,7 @@ type Config struct {
 	ToolContract        string
 	DeploymentFile      string
 	DeploymentDigest    string
+	SkillsRoot          string
 	MCPTimeout          time.Duration
 	MaxConcurrentRuns   int
 	RunTimeout          time.Duration
@@ -67,6 +68,7 @@ func Load() (Config, error) {
 		ToolContract:        getEnv("LIKI_TOOL_CONTRACT_VERSION", ""),
 		DeploymentFile:      getEnv("LIKI_AGENTS_DEPLOYMENT_FILE", ""),
 		DeploymentDigest:    strings.TrimSpace(getEnv("LIKI_AGENTS_DEPLOYMENT_DIGEST", "")),
+		SkillsRoot:          strings.TrimSpace(getEnv("LIKI_AGENTS_SKILLS_ROOT", "")),
 		MaxConcurrentRuns:   32,
 		LLMBaseURL:          getEnv("LIKI_LLM_BASE_URL", "https://api.openai.com/v1"),
 		LLMAPIKey:           getEnv("LIKI_LLM_API_KEY", ""),
@@ -123,6 +125,9 @@ func validate(cfg Config) (Config, error) {
 	}
 	if cfg.DeploymentDigest != "" && !domain.IsValidSHA256Digest(cfg.DeploymentDigest) {
 		return Config{}, fmt.Errorf("LIKI_AGENTS_DEPLOYMENT_DIGEST must be sha256:<64-hex>")
+	}
+	if cfg.SkillsRoot != "" && !isDevelopment {
+		return Config{}, fmt.Errorf("LIKI_AGENTS_SKILLS_ROOT is allowed only in development")
 	}
 	switch cfg.Topology {
 	case TopologySingle:

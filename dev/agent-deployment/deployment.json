@@ -24,12 +24,31 @@
         "version": "1.0.0",
         "description": "Generic development agent",
         "mode": "chat",
-        "instruction": { "path": "instruction.md" },
+        "instruction": {
+          "path": "instruction.md"
+        },
         "tools": {
           "allow": {
-            "engine": ["bazi_chart", "ziwei_chart", "tianwen_time", "city_coords"],
-            "counsel": ["compute_factors", "natal_query", "period_query"]
+            "engine": [
+              "bazi_chart",
+              "ziwei_chart",
+              "tianwen_time",
+              "city_coords"
+            ],
+            "counsel": [
+              "compute_factors",
+              "natal_query",
+              "period_query"
+            ],
+            "skilltoolset": [
+              "list_skills",
+              "load_skill",
+              "load_skill_resource"
+            ]
           }
+        },
+        "skills": {
+          "root": "/skills"
         }
       }
     ]

@@ -148,7 +148,10 @@ func TestAgentCardDescribesSubAgentsWithoutInstructions(t *testing.T) {
 	worker.Description = "generic worker"
 	worker.Mode = agent.AgentModeTask
 	worker.SubAgents = nil
-	worker.Tools = agent.ToolAllowlist{Allow: map[string][]string{"test": {"test_tool"}}}
+	worker.Tools = agent.ToolAllowlist{Allow: map[string][]string{
+		"test":         {"test_tool"},
+		"skilltoolset": {"list_skills", "load_skill", "load_skill_resource"},
+	}}
 	deployment.Spec.Agents = append(deployment.Spec.Agents, worker)
 	if err := deployment.Validate(); err != nil {
 		t.Fatalf("validate deployment: %v", err)
@@ -215,7 +218,9 @@ func TestA2AJSONRPCExecutesRuntimeAndClosesAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 	deployment := testagent.Deployment(t)
-	deployment.Spec.Agents[0].Tools.Allow = map[string][]string{}
+	deployment.Spec.Agents[0].Tools.Allow = map[string][]string{
+		"skilltoolset": {"list_skills", "load_skill", "load_skill_resource"},
+	}
 	if err := deployment.Validate(); err != nil {
 		t.Fatalf("validate deployment: %v", err)
 	}

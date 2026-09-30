@@ -16,13 +16,16 @@ GOPROXY ?= https://goproxy.cn,direct
 LDFLAGS ?= -s -w -X github.com/ml8s/liki-agents/internal/platform/buildinfo.Version=$(VERSION) -X github.com/ml8s/liki-agents/internal/platform/buildinfo.Commit=$(COMMIT) -X github.com/ml8s/liki-agents/internal/platform/buildinfo.BuildTime=$(BUILD_TIME)
 
 TEST_PACKAGES ?= ./...
+COVER_PROFILE ?= $(CURDIR)/coverage.out
+COVER_MIN ?= 75
 COMPOSE_ENV_FILE := $(if $(wildcard .env),--env-file .env)
 
-.PHONY: help fmt fmt-check vet lint-engine lint-readme test check test-db db-backup db-verify build run dev dev-down validate gate image
+.PHONY: help fmt fmt-check vet lint-engine lint-readme test test-coverage check test-db db-backup db-verify build run dev dev-down validate gate image
 help:
 	@echo "make check    - static checks: docs, formatting, lint, vet, and artifact"
 	@echo "make lint-readme - lint and test developer documentation"
 	@echo "make test     - run isolated tests (no deployed Engine dependency)"
+	@echo "make test-coverage - run tests and enforce the coverage floor"
 	@echo "make test-db  - run SQLite persistence tests"
 	@echo "make gate     - pre-push gate: static checks and isolated tests"
 	@echo "make db-backup - create an online SQLite backup"
@@ -50,7 +53,14 @@ vet:
 	$(GO) vet ./...
 
 test:
-	$(GO) test -race -count=1 $(TEST_PACKAGES)
+	$(GO) test -race -count=1 -coverprofile=$(COVER_PROFILE) $(TEST_PACKAGES)
+
+test-coverage: test
+	@COV=$$($(GO) tool cover -func=$(COVER_PROFILE) | tail -1 | awk '{print $$3}' | sed 's/%//'); \
+	echo "coverage: $$COV% (floor $(COVER_MIN)%)"; \
+	if awk -v c="$$COV" -v m="$(COVER_MIN)" 'BEGIN {exit !(c < m)}'; then \
+		echo "❌ coverage $$COV% < $(COVER_MIN)%" >&2; exit 1; \
+	fi
 
 check: lint-readme fmt-check lint-engine vet validate
 
@@ -88,7 +98,7 @@ image: ## Build liki-agents image locally (debug; production uses CI release)
 run:
 	./scripts/dev.sh
 
-gate: check test
+gate: check test-coverage
 
 validate:
 	@$(GO) run ./cmd/liki-agents validate -deployment $(if $(LIKI_AGENTS_DEPLOYMENT_FILE),$(LIKI_AGENTS_DEPLOYMENT_FILE),./dev/agent-deployment/deployment.json)

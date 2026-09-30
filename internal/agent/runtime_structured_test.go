@@ -43,7 +43,8 @@ func buildTestDeployment(t testing.TB) (*Deployment, error) {
 						"schema": {"path": "output.schema.json"},
 						"textPointer": "/answer"
 					},
-					"tools": {"allow": {"test": ["test_tool"]}}
+					"skills": {"root": "SKILLS_ROOT_PLACEHOLDER"},
+									"tools": {"allow": {"test": ["test_tool"], "skilltoolset": ["list_skills", "load_skill", "load_skill_resource"]}}
 									}]
 			}
 		}`,
@@ -59,6 +60,10 @@ func buildTestDeployment(t testing.TB) (*Deployment, error) {
 			}
 		}`,
 	}
+	skillRoot := filepath.Join(root, "skills-root")
+	writeMinimalSkillTree(t, skillRoot)
+	files["agent-deployment.json"] = strings.ReplaceAll(
+		files["agent-deployment.json"], "SKILLS_ROOT_PLACEHOLDER", skillRoot)
 	for name, content := range files {
 		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0600); err != nil {
 			return nil, err

@@ -78,6 +78,7 @@ type AgentDefinition struct {
 	Instruction FileReference    `json:"instruction"`
 	Output      OutputDefinition `json:"output"`
 	Tools       ToolAllowlist    `json:"tools"`
+	Skills      *SkillsBinding   `json:"skills,omitempty"`
 
 	// Runtime-only resolved values. They are never read from JSON.
 	InstructionDigest string               `json:"-"`
@@ -105,6 +106,17 @@ func (o OutputDefinition) Structured() bool {
 
 type ToolAllowlist struct {
 	Allow map[string][]string `json:"allow"`
+}
+
+// SkillsBinding binds an agent to a skilltoolset filesystem root (ADK skill
+// layout: root contains skill directories, each with a SKILL.md whose
+// frontmatter name matches the directory name).
+type SkillsBinding struct {
+	// Root is an absolute path inside the assembly image (/skills or
+	// /expert-packs/liki-<name>/skills).
+	Root string `json:"root"`
+	// Preload is "" (frontmatter), "frontmatter", or "complete".
+	Preload string `json:"preload,omitempty"`
 }
 
 type ToolReference struct {
@@ -432,6 +444,24 @@ func (a *AgentDefinition) validate(mcpServers map[string]struct{}) error {
 	if strings.TrimSpace(a.Instruction.Path) == "" {
 		return fmt.Errorf("instruction.path is required")
 	}
+	if a.Skills != nil {
+		if strings.TrimSpace(a.Skills.Root) == "" {
+			return fmt.Errorf("skills.root is required")
+		}
+		if !strings.HasPrefix(a.Skills.Root, "/") {
+			return fmt.Errorf("skills.root %q must be an absolute path", a.Skills.Root)
+		}
+		switch a.Skills.Preload {
+		case "", "frontmatter", "complete":
+		default:
+			return fmt.Errorf("skills.preload %q must be one of frontmatter, complete", a.Skills.Preload)
+		}
+		if err := validateSkillToolsetAllow(a.Tools.Allow[skillToolsetServer]); err != nil {
+			return fmt.Errorf("skills binding requires tools.allow[%s]: %w", skillToolsetServer, err)
+		}
+	} else if _, has := a.Tools.Allow[skillToolsetServer]; has {
+		return fmt.Errorf("tools.allow[%s] requires a skills binding", skillToolsetServer)
+	}
 	if a.Output.Structured() {
 		if strings.TrimSpace(a.Output.Schema.Path) == "" {
 			return fmt.Errorf("output.schema.path is required when structured output is enabled")
@@ -457,7 +487,11 @@ func (a *AgentDefinition) validate(mcpServers map[string]struct{}) error {
 	seen := make(map[ToolReference]struct{})
 	seenNames := make(map[string]string)
 	for server, tools := range a.Tools.Allow {
-		if _, exists := mcpServers[server]; !exists {
+		if server == skillToolsetServer {
+			if err := validateSkillToolsetAllow(tools); err != nil {
+				return fmt.Errorf("tools.allow[%s]: %w", server, err)
+			}
+		} else if _, exists := mcpServers[server]; !exists {
 			return fmt.Errorf("tools.allow references unknown MCP server %q", server)
 		}
 		for _, tool := range tools {

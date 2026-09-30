@@ -12,20 +12,27 @@ import (
 )
 
 type Config struct {
-	AppName           string
-	Model             string
-	ModelBaseURL      string
-	ModelAPIKey       string
-	ModelTimeout      time.Duration
-	Temperature       float64
-	AuditRecorder     audit.Recorder
-	Metrics           Metrics
-	Provider          string
-	StructuredOutput  string
-	ContractVersion   string
-	GraphVersion      string
-	Deployment        *Deployment
-	DeploymentDigest  string
+	AppName          string
+	Model            string
+	ModelBaseURL     string
+	ModelAPIKey      string
+	ModelTimeout     time.Duration
+	Temperature      float64
+	AuditRecorder    audit.Recorder
+	Metrics          Metrics
+	Provider         string
+	StructuredOutput string
+	ContractVersion  string
+	GraphVersion     string
+	Deployment       *Deployment
+	DeploymentDigest string
+
+	// SkillsRoot overrides every agent's skills.root from the deployment so
+	// that development host and container layouts can point at the same
+	// fixture through different absolute paths. Platform config rejects it
+	// outside development; production always uses the deployment value.
+	SkillsRoot string
+
 	MCPTimeout        time.Duration
 	MaxConcurrentRuns int
 	Now               func() time.Time

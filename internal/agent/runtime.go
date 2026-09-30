@@ -272,6 +272,13 @@ func NewRuntime(config Config) (*Runtime, error) {
 				tool.AllowedToolsPredicate(allowed),
 			))
 		}
+		if binding := skillBinding(config, definition); binding != nil {
+			skillToolset, err := newSkillToolset(binding)
+			if err != nil {
+				return nil, domain.NewError(domain.CodeAgentDefinitionInvalid, fmt.Sprintf("build skill toolset for agent %q: %v", definition.Name, err), nil)
+			}
+			toolsets = append(toolsets, skillToolset)
+		}
 		delete(building, definition.Name)
 		built, err := llmagent.New(definition.ADKConfig(ADKAgentRuntime{
 			RawOutputSchema: definition.RawOutputSchema,

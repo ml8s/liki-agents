@@ -25,7 +25,8 @@ func TestFourAgentArtifactIsLoadable(t *testing.T) {
 					"mode": "chat",
 					"sub_agents": [{"name": "planner"}],
 					"instruction": {"path": "instruction.md"},
-					"tools": {"allow": {}}
+					"skills": {"root": "/skills"},
+					"tools": {"allow": {"skilltoolset": ["list_skills", "load_skill", "load_skill_resource"]}}
 				},
 				{
 					"name": "planner", "version": "1.0.0",
@@ -33,7 +34,8 @@ func TestFourAgentArtifactIsLoadable(t *testing.T) {
 					"mode": "chat",
 					"sub_agents": [{"name": "worker"}],
 					"instruction": {"path": "instruction.md"},
-					"tools": {"allow": {}}
+					"skills": {"root": "/skills"},
+					"tools": {"allow": {"skilltoolset": ["list_skills", "load_skill", "load_skill_resource"]}}
 				},
 				{
 					"name": "worker", "version": "1.0.0",
@@ -41,7 +43,7 @@ func TestFourAgentArtifactIsLoadable(t *testing.T) {
 					"mode": "task",
 					"sub_agents": [{"name": "reviewer"}],
 					"instruction": {"path": "instruction.md"},
-					"tools": {"allow": {"test": ["engine_tool"]}}
+					"skills": {"root": "/skills"}, "tools": {"allow": {"test": ["engine_tool"], "skilltoolset": ["list_skills", "load_skill", "load_skill_resource"]}}
 				},
 				{
 					"name": "reviewer", "version": "1.0.0",
@@ -49,7 +51,8 @@ func TestFourAgentArtifactIsLoadable(t *testing.T) {
 					"mode": "single_turn",
 					"sub_agents": [],
 					"instruction": {"path": "instruction.md"},
-					"tools": {"allow": {}}
+					"skills": {"root": "/skills"},
+					"tools": {"allow": {"skilltoolset": ["list_skills", "load_skill", "load_skill_resource"]}}
 				}
 			]
 		}

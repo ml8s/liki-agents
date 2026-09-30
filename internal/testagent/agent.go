@@ -5,6 +5,7 @@ package testagent
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ml8s/liki-agents/internal/agent"
@@ -28,11 +29,12 @@ func Deployment(t *testing.T) *agent.Deployment {
 						"mode": "chat",
 						"sub_agents": [],
 					"instruction": {"path": "instruction.md"},
+					"skills": {"root": "SKILLS_ROOT_PLACEHOLDER"},
 					"output": {
 						"schema": {"path": "output.schema.json"},
 						"textPointer": "/answer"
 					},
-					"tools": {"allow": {"test": ["test_tool"]}}
+					"tools": {"allow": {"test": ["test_tool"], "skilltoolset": ["list_skills", "load_skill", "load_skill_resource"]}}
 									}]
 			}
 		}`,
@@ -47,6 +49,10 @@ func Deployment(t *testing.T) *agent.Deployment {
 			}
 		}`,
 	}
+	skillRoot := filepath.Join(root, "skills-root")
+	writeMinimalSkill(t, skillRoot)
+	files["agent-deployment.json"] = strings.ReplaceAll(
+		files["agent-deployment.json"], "SKILLS_ROOT_PLACEHOLDER", skillRoot)
 	for name, content := range files {
 		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0600); err != nil {
 			t.Fatal(err)

@@ -95,6 +95,7 @@ func run() (err error) {
 		GraphVersion:      buildinfo.GraphVersion,
 		Deployment:        deployment,
 		DeploymentDigest:  cfg.DeploymentDigest,
+		SkillsRoot:        cfg.SkillsRoot,
 		MCPTimeout:        cfg.MCPTimeout,
 		MaxConcurrentRuns: cfg.MaxConcurrentRuns,
 	})
