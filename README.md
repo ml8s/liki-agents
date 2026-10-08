@@ -17,7 +17,7 @@ observability.
 
 ## Install
 
-Requires Go 1.26+, Node.js 22+, Docker Compose, and golangci-lint 2.x. Clone
+Requires Go 1.26+, Node.js 24.14.1 (see `.nvmrc`), Docker Compose, and golangci-lint 2.x. Clone
 the repository and run `make build`; the binary is written to `bin/liki-agents`.
 
 ## Quick start
