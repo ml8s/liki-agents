@@ -1,3 +1,4 @@
+// These are static contract-regression tests: they assert pinned artifacts/tooling, not runtime behavior.
 package pipeline_test
 
 import (

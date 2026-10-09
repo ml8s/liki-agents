@@ -7,6 +7,7 @@ import (
 )
 
 func TestLLMCallNormalize(t *testing.T) {
+	t.Parallel()
 	call := &LLMCall{ID: " call_1 ", AgentName: " coordinator ", Model: " test-model ", ErrorCode: " runtime_timeout "}
 	call.Normalize()
 	if call.ID != "call_1" || call.AgentName != "coordinator" || call.Model != "test-model" || call.ErrorCode != CodeRuntimeTimeout {
@@ -15,6 +16,7 @@ func TestLLMCallNormalize(t *testing.T) {
 }
 
 func TestLLMCallValidate(t *testing.T) {
+	t.Parallel()
 	started := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
 	valid := func() *LLMCall {
 		return &LLMCall{
@@ -53,6 +55,7 @@ func TestLLMCallValidate(t *testing.T) {
 }
 
 func TestLLMCallLifecycle(t *testing.T) {
+	t.Parallel()
 	started := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
 	finished := started.Add(2 * time.Second)
 

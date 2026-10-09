@@ -2,10 +2,12 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/ml8s/liki-agents/internal/domain"
 )
 
 func TestJSONStringAtPointerFollowsRFC6901(t *testing.T) {
@@ -100,5 +102,36 @@ func TestStructuredOutputPreservesJSONNumberFidelity(t *testing.T) {
 	}
 	if string(state.output.JSON) != `{"answer":"ok","id":9007199254740993}` {
 		t.Fatalf("structured output JSON = %s", state.output.JSON)
+	}
+}
+
+func TestParseStructuredOutputRejections(t *testing.T) {
+	entrypoint := NewTestDeployment(t).Spec.Agents[0]
+	testCases := []struct {
+		name  string
+		value any
+		def   *AgentDefinition
+		code  string
+	}{
+		{name: "nil definition", value: map[string]any{"answer": "x"}, code: domain.CodeStructuredOutputInvalid},
+		{name: "non JSON string", value: "not-json", def: &entrypoint, code: domain.CodeStructuredOutputInvalid},
+		{name: "schema violation", value: map[string]any{"answer": "x", "confidence": 0.5, "extra": true}, def: &entrypoint, code: domain.CodeStructuredOutputInvalid},
+		{name: "pointer not string", value: map[string]any{"answer": 42}, def: &entrypoint, code: domain.CodeStructuredOutputInvalid},
+		{name: "empty answer text", value: map[string]any{"answer": "   ", "confidence": 0.5}, def: &entrypoint, code: domain.CodeStructuredOutputEmpty},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := ParseStructuredOutput(testCase.value, testCase.def)
+			var domainErr *domain.Error
+			if !errors.As(err, &domainErr) || domainErr.Code != testCase.code {
+				t.Fatalf("ParseStructuredOutput() error = %v, want %s", err, testCase.code)
+			}
+		})
+	}
+}
+
+func TestDecodeJSONDocumentRejectsTrailingValues(t *testing.T) {
+	if _, err := decodeJSONDocument([]byte(`{"a":1} trailing`)); err == nil {
+		t.Fatal("decodeJSONDocument() accepted a trailing JSON value")
 	}
 }

@@ -8,6 +8,7 @@ import (
 )
 
 func TestIsValidSHA256Digest(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		value string
 		want  bool

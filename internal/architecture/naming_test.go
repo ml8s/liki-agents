@@ -8,6 +8,7 @@ import (
 )
 
 func TestPackageNamesAreStable(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(moduleRoot(t), "internal")
 	entries, err := os.ReadDir(root)
 	if err != nil {

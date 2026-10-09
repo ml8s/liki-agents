@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/google/jsonschema-go/jsonschema"
 )
 
 func writeDeployment(t *testing.T, root string, manifest string) *Deployment {
@@ -430,5 +432,42 @@ func TestLoadAgentDeploymentValidatesGraph(t *testing.T) {
 	}
 	if _, err := LoadAgentDeployment(filepath.Join(root, "agent-deployment.json")); err == nil || !strings.Contains(err.Error(), "exactly one root Agent") {
 		t.Fatalf("LoadAgentDeployment() error = %v, want cyclic graph rejection", err)
+	}
+}
+
+// TestDeploymentValidateRechecksInMemoryMutation covers the exported
+// Deployment.Validate method directly: an unchanged deployment passes, and
+// mutating the graph to a duplicate agent fails validation.
+func TestDeploymentValidateRechecksInMemoryMutation(t *testing.T) {
+	deployment := NewTestDeployment(t)
+	if err := deployment.Validate(); err != nil {
+		t.Fatalf("valid deployment rejected: %v", err)
+	}
+	original := deployment.Spec.Agents[0].Name
+	deployment.Spec.Agents = append(deployment.Spec.Agents, AgentDefinition{
+		Name:    original,
+		Version: "1.0.0",
+	})
+	if err := deployment.Validate(); err == nil {
+		t.Fatal("duplicate agent name accepted by Validate")
+	}
+}
+
+func TestConvertJSONSchemaToGenaiRejections(t *testing.T) {
+	testCases := []struct {
+		name  string
+		build func() *jsonschema.Schema
+	}{
+		{name: "allOf composition", build: func() *jsonschema.Schema { return &jsonschema.Schema{AllOf: []*jsonschema.Schema{{Type: "string"}}} }},
+		{name: "type array", build: func() *jsonschema.Schema { return &jsonschema.Schema{Types: []string{"string", "null"}} }},
+		{name: "unknown type", build: func() *jsonschema.Schema { return &jsonschema.Schema{Type: "bogus"} }},
+		{name: "non-string enum", build: func() *jsonschema.Schema { return &jsonschema.Schema{Enum: []any{1}} }},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, err := convertJSONSchemaToGenai(testCase.build()); err == nil {
+				t.Fatal("convertJSONSchemaToGenai() accepted unsupported schema")
+			}
+		})
 	}
 }

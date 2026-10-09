@@ -41,6 +41,7 @@ func decodeFile(t *testing.T, path string) any {
 }
 
 func TestAgentDefinitionResolves(t *testing.T) {
+	t.Parallel()
 	schema, err := AgentDefinition()
 	if err != nil {
 		t.Fatalf("AgentDefinition() error = %v", err)
@@ -54,6 +55,7 @@ func TestAgentDefinitionResolves(t *testing.T) {
 }
 
 func TestAgentDefinitionValidatesCanonicalDeployment(t *testing.T) {
+	t.Parallel()
 	schema, err := AgentDefinition()
 	if err != nil {
 		t.Fatalf("AgentDefinition() error = %v", err)
@@ -64,6 +66,7 @@ func TestAgentDefinitionValidatesCanonicalDeployment(t *testing.T) {
 }
 
 func TestAgentDefinitionRemainsCompatibleWithV1MinimalDeployment(t *testing.T) {
+	t.Parallel()
 	schema, err := AgentDefinition()
 	if err != nil {
 		t.Fatalf("AgentDefinition() error = %v", err)
@@ -91,6 +94,7 @@ func TestAgentDefinitionRemainsCompatibleWithV1MinimalDeployment(t *testing.T) {
 }
 
 func TestAgentDefinitionRejectsIncompleteDocuments(t *testing.T) {
+	t.Parallel()
 	schema, err := AgentDefinition()
 	if err != nil {
 		t.Fatalf("AgentDefinition() error = %v", err)
@@ -114,6 +118,7 @@ func TestAgentDefinitionRejectsIncompleteDocuments(t *testing.T) {
 }
 
 func TestAgentDefinitionReturnsStableSchema(t *testing.T) {
+	t.Parallel()
 	first, err := AgentDefinition()
 	if err != nil {
 		t.Fatalf("AgentDefinition() error = %v", err)
@@ -144,6 +149,7 @@ func TestAgentDefinitionReturnsStableSchema(t *testing.T) {
 // contract pointer: the version file's digest must equal the SHA-256 of the
 // embedded schema, so a schema change without a version bump fails the build.
 func TestAgentDefinitionVersionFileMatchesEmbeddedSchemaDigest(t *testing.T) {
+	t.Parallel()
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")

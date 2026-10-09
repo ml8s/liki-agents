@@ -63,6 +63,7 @@ func forbidden(list []string, prefixes ...string) string {
 }
 
 func TestDomainStaysPure(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(moduleRoot(t), "internal", "domain")
 	for path, imports := range importsUnder(t, root) {
 		if imported := forbidden(imports,
@@ -82,6 +83,7 @@ func TestDomainStaysPure(t *testing.T) {
 }
 
 func TestADKStaysInRuntimeAndProtocolAdapters(t *testing.T) {
+	t.Parallel()
 	root := moduleRoot(t)
 	for path, imports := range importsUnder(t, root) {
 		protocolAdapter := false
@@ -100,6 +102,7 @@ func TestADKStaysInRuntimeAndProtocolAdapters(t *testing.T) {
 }
 
 func TestProductionSourceDoesNotMutateHostState(t *testing.T) {
+	t.Parallel()
 	root := moduleRoot(t)
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil || entry.IsDir() || !strings.HasSuffix(path, ".go") {
@@ -124,6 +127,7 @@ func TestProductionSourceDoesNotMutateHostState(t *testing.T) {
 }
 
 func TestLegacyRuntimeAbstractionsAreAbsent(t *testing.T) {
+	t.Parallel()
 	root := moduleRoot(t)
 	banned := []string{
 		"ThreadRepository",
@@ -159,6 +163,7 @@ func TestLegacyRuntimeAbstractionsAreAbsent(t *testing.T) {
 }
 
 func TestDatabaseTechnologyStaysInAuditSQLite(t *testing.T) {
+	t.Parallel()
 	root := moduleRoot(t)
 	for path, imports := range importsUnder(t, root) {
 		if strings.HasPrefix(path, filepath.Join("internal", "audit", "sqlite")) {
@@ -171,6 +176,7 @@ func TestDatabaseTechnologyStaysInAuditSQLite(t *testing.T) {
 }
 
 func TestRuntimeDoesNotUseADKDemoLogging(t *testing.T) {
+	t.Parallel()
 	for path, imports := range importsUnder(t, filepath.Join(moduleRoot(t), "internal")) {
 		if imported := forbidden(imports, "google.golang.org/adk/v2/plugin/loggingplugin"); imported != "" {
 			t.Errorf("%s imports unsafe demo logger %s", path, imported)
@@ -179,6 +185,7 @@ func TestRuntimeDoesNotUseADKDemoLogging(t *testing.T) {
 }
 
 func TestADKLauncherIsNotAPublicAPI(t *testing.T) {
+	t.Parallel()
 	for path, imports := range importsUnder(t, moduleRoot(t)) {
 		if imported := forbidden(imports,
 			"google.golang.org/adk/v2/cmd/launcher",
@@ -190,6 +197,7 @@ func TestADKLauncherIsNotAPublicAPI(t *testing.T) {
 }
 
 func TestAgentCardDoesNotUseInstructionDerivedSkills(t *testing.T) {
+	t.Parallel()
 	root := moduleRoot(t)
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil || entry.IsDir() || !strings.HasSuffix(path, ".go") {
@@ -213,6 +221,7 @@ func TestAgentCardDoesNotUseInstructionDerivedSkills(t *testing.T) {
 }
 
 func TestProtocolAdaptersDoNotCrossImport(t *testing.T) {
+	t.Parallel()
 	root := moduleRoot(t)
 	for path, imports := range importsUnder(t, root) {
 		if strings.HasPrefix(path, filepath.Join("internal", "protocol", "a2a")) &&
@@ -231,6 +240,7 @@ func TestProtocolAdaptersDoNotCrossImport(t *testing.T) {
 }
 
 func TestErrorCodesAreConstants(t *testing.T) {
+	t.Parallel()
 	root := moduleRoot(t)
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil || entry.IsDir() || !strings.HasSuffix(path, ".go") {
@@ -259,6 +269,7 @@ func TestErrorCodesAreConstants(t *testing.T) {
 }
 
 func TestAgentRuntimeHasNoBuiltInDomainWorkflow(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(moduleRoot(t), "internal", "agent")
 	banned := []string{
 		"ExpertOpinion",

@@ -82,6 +82,10 @@ func (r *flakyRunTerminalAudit) Record(ctx context.Context, event *audit.Event) 
 }
 
 func newAuditRuntimeWith(t *testing.T, recorder audit.Recorder, maxConcurrent int) *agent.Runtime {
+	return newAuditRuntimeWithClock(t, recorder, maxConcurrent, nil)
+}
+
+func newAuditRuntimeWithClock(t *testing.T, recorder audit.Recorder, maxConcurrent int, now func() time.Time) *agent.Runtime {
 	t.Helper()
 	deployment := agent.NewTestDeployment(t)
 	t.Setenv("TEST_MCP_ENDPOINT", "http://127.0.0.1:9/mcp")
@@ -95,6 +99,7 @@ func newAuditRuntimeWith(t *testing.T, recorder audit.Recorder, maxConcurrent in
 		Provider:          "test-provider",
 		AuditRecorder:     recorder,
 		MaxConcurrentRuns: maxConcurrent,
+		Now:               now,
 	})
 	if err != nil {
 		t.Fatalf("NewRuntime() error = %v", err)
@@ -189,7 +194,12 @@ func TestExternalAuditRunRejectsDuplicateRunID(t *testing.T) {
 }
 
 func TestExternalAuditRunRecordsDuration(t *testing.T) {
-	runtime, events := newAuditRuntime(t)
+	events := &recordingAuditEvents{}
+	tick := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	runtime := newAuditRuntimeWithClock(t, events, 1, func() time.Time {
+		tick = tick.Add(time.Second)
+		return tick
+	})
 	ctx := context.Background()
 	scope := agent.AuditRunScope{
 		RunID:    "task_duration",
@@ -200,7 +210,6 @@ func TestExternalAuditRunRecordsDuration(t *testing.T) {
 	if err := runtime.BeginAuditRun(ctx, "context_1", scope); err != nil {
 		t.Fatalf("BeginAuditRun() error = %v", err)
 	}
-	time.Sleep(2 * time.Millisecond)
 	if err := runtime.EndAuditRun(ctx, "context_1", nil); err != nil {
 		t.Fatalf("EndAuditRun() error = %v", err)
 	}
@@ -241,5 +250,26 @@ func TestExternalAuditRunRetriesTerminalAppendAndReleasesOnce(t *testing.T) {
 	}
 	if err := runtime.EndAuditRun(ctx, "context_2", nil); err != nil {
 		t.Fatalf("EndAuditRun() after release error = %v", err)
+	}
+}
+
+type existsAudit struct {
+	recordingAuditEvents
+	exists bool
+}
+
+func (e *existsAudit) RunExists(_ context.Context, _ domain.ID) (bool, error) {
+	return e.exists, nil
+}
+
+// TestExternalAuditRunRejectsDurableDuplicateRunID covers the durable
+// run-id check (ensureDurableRunID) that runs before in-memory bookkeeping.
+func TestExternalAuditRunRejectsDurableDuplicateRunID(t *testing.T) {
+	runtime := newAuditRuntimeWith(t, &existsAudit{exists: true}, 1)
+	scope := agent.AuditRunScope{RunID: "run_dup", ThreadID: "thread_1", UserID: "user_1", Protocol: "a2a"}
+	err := runtime.BeginAuditRun(context.Background(), "session_dup", scope)
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeRunIDConflict {
+		t.Fatalf("BeginAuditRun() error = %v, want %s", err, domain.CodeRunIDConflict)
 	}
 }

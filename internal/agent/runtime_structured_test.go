@@ -715,3 +715,33 @@ func TestRuntimeBuildsStandardADKAgentGraph(t *testing.T) {
 		t.Fatalf("worker name = %q", worker.Name())
 	}
 }
+
+// TestRuntimeRunTerminalEvidenceAfterChildLifecycles guards the terminal write
+// order on the AG-UI (Run) path: child lifecycle failures must be appended
+// before the run's terminal event, matching EndAuditRun's ordering.
+func TestRuntimeRunTerminalEvidenceAfterChildLifecycles(t *testing.T) {
+	events := &recordingAudit{}
+	runtime := newTestRuntime(t, plainTestDeployment(t), events, &fakeLLM{err: errors.New("model unavailable")})
+	_, runErr := runtime.Run(context.Background(), RunRequest{
+		RunID: "run_order", ThreadID: "thread_order", UserID: "user_1", UserMessage: "x",
+	}, nil)
+	if runErr == nil {
+		t.Fatal("expected run failure")
+	}
+	indexOf := func(want audit.EventType) int {
+		for index, event := range events.events {
+			if event.Type == want {
+				return index
+			}
+		}
+		return -1
+	}
+	llmFailed := indexOf(audit.EventLLMCallFailed)
+	runFailed := indexOf(audit.EventRunFailed)
+	if llmFailed < 0 || runFailed < 0 {
+		t.Fatalf("missing terminal evidence: llm.failed=%d run.failed=%d", llmFailed, runFailed)
+	}
+	if runFailed <= llmFailed {
+		t.Fatalf("run.failed (idx %d) must follow llm.call.failed (idx %d)", runFailed, llmFailed)
+	}
+}

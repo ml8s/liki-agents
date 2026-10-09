@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	adkagent "google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/genai"
 )
 
 type fakeAgentContext struct {
@@ -416,5 +417,23 @@ func TestLedgerUsesInvokingAgentPromptProvenance(t *testing.T) {
 	}
 	if started[0].DefinitionName == "" || started[0].DefinitionDigest == "" {
 		t.Fatalf("LLM audit lacks deployment provenance: %#v", started[0])
+	}
+}
+
+// TestLLMUsageFromResponse maps genai usage metadata into the token accounting
+// contract, including the empty case.
+func TestLLMUsageFromResponse(t *testing.T) {
+	if got := llmUsageFromResponse(nil); got != (domain.LLMTokenUsage{}) {
+		t.Fatalf("llmUsageFromResponse(nil) = %+v, want zero", got)
+	}
+	got := llmUsageFromResponse(&genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:     10,
+		CandidatesTokenCount: 2,
+		ThoughtsTokenCount:   1,
+		TotalTokenCount:      13,
+	})
+	want := domain.LLMTokenUsage{PromptTokens: 10, CompletionTokens: 2, ThoughtTokens: 1, TotalTokens: 13}
+	if got != want {
+		t.Fatalf("llmUsageFromResponse() = %+v, want %+v", got, want)
 	}
 }

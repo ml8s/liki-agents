@@ -3,6 +3,7 @@ package domain
 import "testing"
 
 func TestValidIdentifier(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name  string
 		value string
