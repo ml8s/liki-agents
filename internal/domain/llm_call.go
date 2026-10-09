@@ -6,18 +6,21 @@ import (
 	"time"
 )
 
+// LLMCallStatus is the lifecycle state of one model call.
 type LLMCallStatus string
 
 // ID is a logical cross-service identifier. The agent does not own foreign
 // tables; IDs are opaque audit correlation values.
 type ID string
 
+// Model call lifecycle states.
 const (
 	LLMCallRunning   LLMCallStatus = "running"
 	LLMCallCompleted LLMCallStatus = "completed"
 	LLMCallFailed    LLMCallStatus = "failed"
 )
 
+// LLMTokenUsage is the token accounting for one model call.
 type LLMTokenUsage struct {
 	PromptTokens     int64
 	CompletionTokens int64
@@ -25,6 +28,7 @@ type LLMTokenUsage struct {
 	TotalTokens      int64
 }
 
+// LLMCall is one auditable model invocation inside a run.
 type LLMCall struct {
 	ID                    string
 	RunID                 ID
@@ -53,6 +57,7 @@ type LLMCall struct {
 	FinishedAt            time.Time
 }
 
+// Normalize trims whitespace from identifier and code fields.
 func (c *LLMCall) Normalize() {
 	c.ID = strings.TrimSpace(c.ID)
 	c.AgentName = strings.TrimSpace(c.AgentName)
@@ -60,6 +65,7 @@ func (c *LLMCall) Normalize() {
 	c.ErrorCode = strings.TrimSpace(c.ErrorCode)
 }
 
+// Validate reports whether the call carries the required provenance.
 func (c *LLMCall) Validate() error {
 	switch {
 	case c.ID == "":
@@ -80,6 +86,7 @@ func (c *LLMCall) Validate() error {
 	return nil
 }
 
+// Complete marks the call succeeded and records its token usage.
 func (c *LLMCall) Complete(usage LLMTokenUsage, finishedAt time.Time) {
 	c.Status = LLMCallCompleted
 	c.PromptTokens = usage.PromptTokens
@@ -90,6 +97,7 @@ func (c *LLMCall) Complete(usage LLMTokenUsage, finishedAt time.Time) {
 	c.DurationMS = finishedAt.Sub(c.StartedAt).Milliseconds()
 }
 
+// Fail marks the call failed with a stable error code.
 func (c *LLMCall) Fail(err error, finishedAt time.Time) {
 	c.Status = LLMCallFailed
 	c.FinishedAt = finishedAt

@@ -10,7 +10,7 @@ import (
 
 func writeDeployment(t *testing.T, root string, manifest string) *Deployment {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(`{
@@ -18,10 +18,10 @@ func writeDeployment(t *testing.T, root string, manifest string) *Deployment {
 		"additionalProperties": false,
 		"required": ["answer"],
 		"properties": {"answer": {"type": "string"}}
-	}`), 0600); err != nil {
+	}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(manifest), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(manifest), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	deployment, err := LoadAgentDeployment(filepath.Join(root, "agent-deployment.json"))
@@ -181,13 +181,13 @@ func TestLoadAgentDeploymentRejectsInvalidManifests(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			root := t.TempDir()
-			if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0600); err != nil {
+			if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(`{"type":"object"}`), 0600); err != nil {
+			if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(`{"type":"object"}`), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(testCase.manifest), 0600); err != nil {
+			if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(testCase.manifest), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			_, err := LoadAgentDeployment(filepath.Join(root, "agent-deployment.json"))
@@ -201,13 +201,13 @@ func TestLoadAgentDeploymentRejectsInvalidManifests(t *testing.T) {
 func TestLoadAgentDeploymentRejectsAmbiguousOutputSchema(t *testing.T) {
 	manifest := strings.Replace(validManifest(), `"answer": {"type": "string"}`, `"answer": {"type": "string"}, "answer": {"type": "string"}`, 1)
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(`{"type":"object","answer":{"type":"string"},"answer":{"type":"string"}}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(`{"type":"object","answer":{"type":"string"},"answer":{"type":"string"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(manifest), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(manifest), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -262,13 +262,13 @@ func TestAgentOutputPointerMustSelectAStringAtLoadTime(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
 			manifest := strings.Replace(validManifest(), `"/answer"`, `"`+test.pointer+`"`, 1)
-			if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0600); err != nil {
+			if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(test.schema), 0600); err != nil {
+			if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(test.schema), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(manifest), 0600); err != nil {
+			if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(manifest), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			_, err := LoadAgentDeployment(filepath.Join(root, "agent-deployment.json"))
@@ -322,13 +322,13 @@ func TestAgentOutputRequiresPairedSchemaAndPointer(t *testing.T) {
 	t.Run("root pointer", func(t *testing.T) {
 		manifest := strings.Replace(validManifest(), `"/answer"`, `"/"`, 1)
 		root := t.TempDir()
-		if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(`{"type":"object"}`), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(`{"type":"object"}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(manifest), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(manifest), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		_, err := LoadAgentDeployment(filepath.Join(root, "agent-deployment.json"))
@@ -372,13 +372,13 @@ func TestAgentOutputRequiresPairedSchemaAndPointer(t *testing.T) {
 				manifest = strings.Replace(manifest, `"schema": {"path": "output.schema.json"}`, `"textPointer": "/answer"`, 1)
 			}
 			root := t.TempDir()
-			if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0600); err != nil {
+			if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(`{"type":"object"}`), 0600); err != nil {
+			if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(`{"type":"object"}`), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(manifest), 0600); err != nil {
+			if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(manifest), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			_, err := LoadAgentDeployment(filepath.Join(root, "agent-deployment.json"))
@@ -419,13 +419,13 @@ func TestLoadAgentDeploymentValidatesGraph(t *testing.T) {
 		cycle = strings.Replace(manifest, `"sub_agents": []`, `"sub_agents": [{"name":"coordinator"}]`, 1)
 	}
 	root = t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(`{"type":"object"}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(`{"type":"object"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(cycle), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(cycle), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := LoadAgentDeployment(filepath.Join(root, "agent-deployment.json")); err == nil || !strings.Contains(err.Error(), "exactly one root Agent") {

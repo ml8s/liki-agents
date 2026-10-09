@@ -58,6 +58,9 @@ skill/project.
    but not secrets, prompts, raw model output, or tool payloads.
 8. Audit write and recovery failures fail closed; cancellation does not prevent
    terminal audit events.
+9. A reconciled terminal event (interrupted run, model call, tool, or
+   delegation) carries the same trace and definition provenance as its started
+   fact.
 
 ## Ownership boundary
 

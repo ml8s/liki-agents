@@ -12,14 +12,18 @@ import (
 	"gorm.io/gorm"
 )
 
+// AuditEventRepository persists immutable audit events.
 type AuditEventRepository struct {
 	db *gorm.DB
 }
 
+// NewAuditEventRepository builds an audit repository over a database handle.
 func NewAuditEventRepository(db *gorm.DB) *AuditEventRepository {
 	return &AuditEventRepository{db: db}
 }
 
+// Record appends one validated audit event, treating a retry of an identical
+// event as idempotent.
 func (r *AuditEventRepository) Record(ctx context.Context, event *audit.Event) error {
 	if event == nil {
 		return audit.NewError(audit.CodeAuditAppendFailed, "audit event is required", nil)
@@ -176,6 +180,7 @@ func recoveryEvent(original auditEventModel, terminalType, id string, now time.T
 	return event, nil
 }
 
+// RunExists reports whether any audit evidence exists for the run id.
 func (r *AuditEventRepository) RunExists(ctx context.Context, runID domain.ID) (bool, error) {
 	var count int64
 	if err := r.db.WithContext(ctx).

@@ -99,7 +99,14 @@ func New(runtime *agent.Runtime, config Config) (*Server, error) {
 		RunnerConfig: runtime.RunnerConfig(),
 		GenAIPartConverter: func(_ context.Context, event *session.Event, part *genai.Part) (*a2a.Part, error) {
 			entrypoint := runtime.Entrypoint()
-			return agentPart(event, part, entrypoint.Output.Structured(), entrypoint)
+			// Model-text visibility is resolved per event author against the
+			// deployment, mirroring the AG-UI projector. A structured expert
+			// delegated under a plain entrypoint must not leak raw JSON.
+			exposesText := func(author string) bool {
+				definition, ok := deployment.Agent(author)
+				return ok && agent.ExposesModelText(definition)
+			}
+			return agentPart(event, part, exposesText, entrypoint)
 		},
 		BeforeExecuteCallback: func(ctx context.Context, request *a2asrv.ExecutorContext) (context.Context, error) {
 			caller := ""
@@ -128,10 +135,7 @@ func New(runtime *agent.Runtime, config Config) (*Server, error) {
 		},
 		AfterExecuteCallback: func(ctx adka2a.ExecutorContext, _ *a2a.TaskStatusUpdateEvent, err error) error {
 			cancelExecution(ctx)
-			if auditErr := runtime.EndAuditRun(ctx, ctx.SessionID(), err); auditErr != nil {
-				return auditErr
-			}
-			return nil
+			return runtime.EndAuditRun(ctx, ctx.SessionID(), err)
 		},
 		A2AExecutionCleanupCallback: func(ctx context.Context, request *a2asrv.ExecutorContext, _ []*a2a.AgentCard, _ a2a.SendMessageResult, cause error) {
 			cancelExecution(ctx)
@@ -208,14 +212,15 @@ func (s *Server) EndpointHandler() http.Handler {
 	return s.endpoint
 }
 
-// agentPart maps native ADK parts onto A2A artifact parts. Structured model
-// text is JSON payload, so partial text chunks are dropped and the final text
-// part carries the user-facing text selected by the Agent's JSON Pointer.
-// Plain-text Agents and tool facts keep the framework's default mapping.
+// agentPart maps native ADK parts onto A2A artifact parts. Model-text
+// visibility is decided per event author by exposesText: plain Authors stream
+// their text, structured or unknown Authors never emit raw model text. Only a
+// structured entrypoint's validated final answer becomes a data part, carrying
+// the user-facing text selected by its JSON Pointer.
 func agentPart(
 	event *session.Event,
 	part *genai.Part,
-	structured bool,
+	exposesText func(author string) bool,
 	entrypoint *agent.AgentDefinition,
 ) (*a2a.Part, error) {
 	if part == nil {
@@ -228,7 +233,7 @@ func agentPart(
 		}
 		return adka2a.ToA2APart(part, longRunningToolIDs)
 	}
-	if !structured {
+	if event != nil && exposesText != nil && exposesText(event.Author) {
 		if strings.TrimSpace(part.Text) == "" {
 			return nil, nil
 		}
@@ -238,7 +243,7 @@ func agentPart(
 		}
 		return adka2a.ToA2APart(part, longRunningToolIDs)
 	}
-	if event != nil && event.Author == entrypoint.Name && event.IsFinalResponse() {
+	if event != nil && entrypoint != nil && event.Author == entrypoint.Name && event.IsFinalResponse() {
 		value, ok := event.Actions.StateDelta[agent.StructuredOutputStateKey(entrypoint.Name)]
 		if ok {
 			output, err := agent.ParseStructuredOutput(value, entrypoint)

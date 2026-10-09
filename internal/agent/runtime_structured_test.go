@@ -65,7 +65,7 @@ func buildTestDeployment(t testing.TB) (*Deployment, error) {
 	files["agent-deployment.json"] = strings.ReplaceAll(
 		files["agent-deployment.json"], "SKILLS_ROOT_PLACEHOLDER", skillRoot)
 	for name, content := range files {
-		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o600); err != nil {
 			return nil, err
 		}
 	}
@@ -541,6 +541,53 @@ func TestRuntimeRunProducesStructuredAnswerWithoutPayloadLeak(t *testing.T) {
 	}
 	if strings.Contains(result.Text, `\"answer\"`) {
 		t.Fatal("answer still contains JSON payload markers")
+	}
+}
+
+// TestStructuredAnswerConsistentAcrossProtocolSources proves the two protocol
+// adapters derive the same user-facing answer from one run: AG-UI reads the
+// validated session-state value (RunResult.Text) while A2A reads the event
+// StateDelta, and both must finalize through ParseStructuredOutput.
+func TestStructuredAnswerConsistentAcrossProtocolSources(t *testing.T) {
+	deployment := NewTestDeployment(t)
+	entrypoint, err := deployment.EntrypointDefinition()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"answer":"一致结论","confidence":0.88}`
+	events := &recordingAudit{}
+	runtime := newTestRuntime(t, deployment, events, &fakeLLM{responses: []*model.LLMResponse{{
+		Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: payload}}},
+	}}})
+
+	var stateDelta any
+	var sawDelta bool
+	result, err := runtime.Run(context.Background(), RunRequest{
+		RunID: "run_consistency", ThreadID: "thread_consistency", UserID: "user_1", UserMessage: "看事业",
+	}, func(event *session.Event) error {
+		if event != nil && event.Actions.StateDelta != nil {
+			if value, ok := event.Actions.StateDelta[StructuredOutputStateKey(entrypoint.Name)]; ok {
+				stateDelta = value
+				sawDelta = true
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !sawDelta {
+		t.Fatal("structured entrypoint run did not project an observable StateDelta")
+	}
+	a2aOutput, err := ParseStructuredOutput(stateDelta, entrypoint)
+	if err != nil {
+		t.Fatalf("ParseStructuredOutput(StateDelta) error = %v", err)
+	}
+	if result.Text != a2aOutput.Text {
+		t.Fatalf("AG-UI answer %q != A2A answer %q", result.Text, a2aOutput.Text)
+	}
+	if result.Text != "一致结论" {
+		t.Fatalf("answer = %q, want the pointer-selected text", result.Text)
 	}
 }
 

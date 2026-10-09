@@ -9,6 +9,10 @@ Required controls:
   development.
 - The same internal token for protocol calls and `/metrics`.
 - Verified user context supplied by the gateway for AG-UI.
+- The browser identity header is adopted on AG-UI only; A2A machine callers
+  sharing the internal token cannot spoof a user identity.
+- Internet-facing request rate limiting is owned by the gateway; the runtime's
+  internal per-source limiter only resists token brute force.
 - Bounded per-source throttling of invalid bearer or identity attempts.
 - Mandatory deployment digest pinning outside development.
 - HTTPS-only LLM endpoints outside development and no credentials embedded in

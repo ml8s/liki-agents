@@ -11,13 +11,40 @@ import (
 	"google.golang.org/genai"
 )
 
+// exposeAll treats every author as plain-text visible; exposeNone hides every
+// author's model text. Both stand in for a deployment-derived resolver.
+func exposeAll() func(string) bool { return func(string) bool { return true } }
+
+func exposeNone() func(string) bool { return func(string) bool { return false } }
+
+// exposeByDeployment resolves model-text visibility per author from the
+// deployment, mirroring the resolver built by a2a.New.
+func exposeByDeployment(deployment *agent.Deployment) func(string) bool {
+	return func(author string) bool {
+		definition, ok := deployment.Agent(author)
+		return ok && agent.ExposesModelText(definition)
+	}
+}
+
+// visibilityDeployment models a plain-text entrypoint delegating to a
+// structured expert, the topology that previously leaked raw model JSON.
+func visibilityDeployment() *agent.Deployment {
+	return &agent.Deployment{
+		Metadata: agent.DeploymentMetadata{Name: "t", Version: "1.0.0"},
+		Spec: agent.DeploymentSpec{Agents: []agent.AgentDefinition{
+			{Name: "main"},
+			{Name: "worker", Output: agent.OutputDefinition{TextPointer: "/answer"}},
+		}},
+	}
+}
+
 func TestAgentPartPassesPlainTextThroughFrameworkMapping(t *testing.T) {
 	event := &session.Event{
 		LLMResponse: model.LLMResponse{
 			Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "plain answer"}}},
 		},
 	}
-	part, err := agentPart(event, &genai.Part{Text: "plain answer"}, false, nil)
+	part, err := agentPart(event, &genai.Part{Text: "plain answer"}, exposeAll(), nil)
 	if err != nil {
 		t.Fatalf("agentPart() error = %v", err)
 	}
@@ -34,7 +61,7 @@ func TestAgentPartDropsPartialPayloadText(t *testing.T) {
 			Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: `{"answer":"par`}}},
 		},
 	}
-	part, err := agentPart(event, &genai.Part{Text: `{"answer":"par`}, true, structuredEntrypoint(t))
+	part, err := agentPart(event, &genai.Part{Text: `{"answer":"par`}, exposeNone(), structuredEntrypoint(t))
 	if err != nil {
 		t.Fatalf("agentPart() error = %v", err)
 	}
@@ -54,7 +81,7 @@ func TestAgentPartSubstitutesDeclaredPointer(t *testing.T) {
 	}
 	event.Author = "main"
 	entrypoint := structuredEntrypoint(t)
-	part, err := agentPart(event, &genai.Part{Text: `{"answer":"raw payload"}`}, true, entrypoint)
+	part, err := agentPart(event, &genai.Part{Text: `{"answer":"raw payload"}`}, exposeNone(), entrypoint)
 	if err != nil {
 		t.Fatalf("agentPart() error = %v", err)
 	}
@@ -82,7 +109,7 @@ func TestAgentPartKeepsToolCallFacts(t *testing.T) {
 			}},
 		},
 	}
-	part, err := agentPart(event, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "test_tool"}}, true, structuredEntrypoint(t))
+	part, err := agentPart(event, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "test_tool"}}, exposeNone(), structuredEntrypoint(t))
 	if err != nil {
 		t.Fatalf("agentPart() error = %v", err)
 	}
@@ -101,12 +128,69 @@ func TestAgentPartIgnoresNonEntrypointStructuredOutput(t *testing.T) {
 			agent.StructuredOutputStateKey("worker"): map[string]any{"answer": "worker answer"},
 		}},
 	}
-	part, err := agentPart(event, &genai.Part{Text: `{"answer":"worker payload"}`}, true, structuredEntrypoint(t))
+	part, err := agentPart(event, &genai.Part{Text: `{"answer":"worker payload"}`}, exposeNone(), structuredEntrypoint(t))
 	if err != nil {
 		t.Fatalf("agentPart() error = %v", err)
 	}
 	if part != nil {
 		t.Fatalf("worker structured part = %#v, want nil", part)
+	}
+}
+
+func TestAgentPartSuppressesStructuredAuthorRawPayload(t *testing.T) {
+	// A structured worker under a plain entrypoint must not leak its raw model
+	// JSON on the A2A wire, matching the AG-UI projector's per-author rule.
+	resolver := exposeByDeployment(visibilityDeployment())
+	event := &session.Event{
+		Author: "worker",
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: `{"answer":"internal","secret":true}`}}},
+		},
+	}
+	part, err := agentPart(event, &genai.Part{Text: `{"answer":"internal","secret":true}`}, resolver, structuredEntrypoint(t))
+	if err != nil {
+		t.Fatalf("agentPart() error = %v", err)
+	}
+	if part != nil {
+		t.Fatalf("structured worker raw payload = %#v, want suppressed", part)
+	}
+}
+
+func TestAgentPartStreamsPlainAuthorText(t *testing.T) {
+	// Per-author visibility: a plain author is streamed even when the
+	// deployment's entrypoint is structured, consistent with the AG-UI
+	// projector.
+	resolver := exposeByDeployment(visibilityDeployment())
+	event := &session.Event{
+		Author: "main",
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "orchestrator note"}}},
+		},
+	}
+	part, err := agentPart(event, &genai.Part{Text: "orchestrator note"}, resolver, structuredEntrypoint(t))
+	if err != nil {
+		t.Fatalf("agentPart() error = %v", err)
+	}
+	text, ok := part.Content.(a2a.Text)
+	if !ok || text != "orchestrator note" {
+		t.Fatalf("plain author artifact = %#v, want text", part.Content)
+	}
+}
+
+func TestAgentPartHidesUnknownAuthorText(t *testing.T) {
+	// Unknown or user-authored projections are not streamed, matching the
+	// AG-UI projector's default.
+	event := &session.Event{
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "client echo"}}},
+		},
+	}
+	part, err := agentPart(event, &genai.Part{Text: "client echo"}, exposeByDeployment(visibilityDeployment()), structuredEntrypoint(t))
+	if err != nil {
+		t.Fatalf("agentPart() error = %v", err)
+	}
+	if part != nil {
+		t.Fatalf("unknown author part = %#v, want suppressed", part)
 	}
 }
 

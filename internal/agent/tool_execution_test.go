@@ -19,11 +19,11 @@ type stubMetrics struct {
 
 func (m *stubMetrics) ObserveLLMCall(string, string, domain.LLMTokenUsage) {}
 
-func (m *stubMetrics) ObserveAgentDelegation(caller, target, status string, duration time.Duration) {
+func (m *stubMetrics) ObserveAgentDelegation(caller, target, status string, _ time.Duration) {
 	m.calls = append(m.calls, caller+"/"+target+"/"+status)
 }
 
-func (m *stubMetrics) ObserveToolCall(agent, tool, status string, duration time.Duration) {
+func (m *stubMetrics) ObserveToolCall(agent, tool, status string, _ time.Duration) {
 	m.calls = append(m.calls, agent+"/"+tool+"/"+status)
 }
 
@@ -173,10 +173,10 @@ func TestToolAuditorFailsPendingWhenRunEnds(t *testing.T) {
 		t.Fatalf("BeforeTool() error = %v", err)
 	}
 
-	if err := auditor.FailPending(context.Background(), newTestScope()); err != nil {
+	if err := auditor.FailPending(ctx, newTestScope()); err != nil {
 		t.Fatalf("FailPending() error = %v", err)
 	}
-	if err := auditor.FailPending(context.Background(), newTestScope()); err != nil {
+	if err := auditor.FailPending(ctx, newTestScope()); err != nil {
 		t.Fatalf("second FailPending() error = %v", err)
 	}
 
@@ -192,6 +192,9 @@ func TestToolAuditorFailsPendingWhenRunEnds(t *testing.T) {
 	}
 	if failed[0].Payload["input_digest"].(string) == "" {
 		t.Fatal("interrupted tool audit lacks input digest")
+	}
+	if failed[0].TraceID == "" || failed[0].SpanID == "" {
+		t.Fatal("interrupted tool audit lacks trace correlation")
 	}
 	if len(metrics.calls) != 1 || !strings.HasSuffix(metrics.calls[0], "/failed") {
 		t.Fatalf("tool metrics = %v", metrics.calls)
@@ -249,5 +252,41 @@ func TestToolAuditorRetainsPendingWhenTerminalAuditWriteFails(t *testing.T) {
 	}
 	if got := len(events.eventsOfType(audit.EventToolCallFailed)); got != 1 {
 		t.Fatalf("terminal failed events after reconciliation = %d, want 1", got)
+	}
+}
+
+// TestToolAuditorFailPendingRetainsRecordForRetry guards the reconciliation
+// contract: a transient append failure must not dequeue the pending record, so
+// EndAuditRun's cleanup retry can still emit terminal evidence.
+func TestToolAuditorFailPendingRetainsRecordForRetry(t *testing.T) {
+	recorder := &failOnceStubAudit{eventType: audit.EventToolCallFailed}
+	deployment := NewTestDeployment(t)
+	metrics := &stubMetrics{}
+	ledger := newLLMLedger(recorder, metrics, "test-provider", deployment, fixedLedgerNow)
+	auditor := newToolExecutionAuditor(recorder, nil, fixedLedgerNow, "test-provider", deployment, ledger.scope)
+	ledger.begin("session_retry", newTestScope())
+	ctx := &fakeAgentContext{
+		sessionID:      "session_retry",
+		invocationID:   "inv_retry",
+		agentName:      "main",
+		functionCallID: "call_retry",
+	}
+	if _, err := auditor.BeforeTool(ctx, fakeTool("test_tool"), map[string]any{"input": "x"}); err != nil {
+		t.Fatalf("BeforeTool() error = %v", err)
+	}
+	// First reconciliation hits a transient write failure; the record must stay
+	// pending instead of being dequeued into the void.
+	if err := auditor.FailPending(context.Background(), newTestScope()); err == nil {
+		t.Fatal("FailPending() unexpectedly survived a terminal append failure")
+	}
+	if got := len(recorder.eventsOfType(audit.EventToolCallFailed)); got != 0 {
+		t.Fatalf("failed events after failed attempt = %d, want 0", got)
+	}
+	// A retry (cleanup callback) now emits the terminal evidence.
+	if err := auditor.FailPending(context.Background(), newTestScope()); err != nil {
+		t.Fatalf("retry FailPending() error = %v", err)
+	}
+	if got := len(recorder.eventsOfType(audit.EventToolCallFailed)); got != 1 {
+		t.Fatalf("failed events after retry = %d, want 1", got)
 	}
 }

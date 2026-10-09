@@ -1,3 +1,4 @@
+// Package config loads and validates the runtime's environment configuration.
 package config
 
 import (
@@ -13,6 +14,7 @@ import (
 	"github.com/ml8s/liki-agents/internal/domain"
 )
 
+// Config is the fully resolved runtime configuration.
 type Config struct {
 	Env                 string
 	Topology            Topology
@@ -56,6 +58,7 @@ const (
 	TopologyMulti Topology = "multi"
 )
 
+// Load reads configuration from the environment and validates it.
 func Load() (Config, error) {
 	cfg := Config{
 		Env:                 getEnv("LIKI_ENV", "development"),

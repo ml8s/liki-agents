@@ -11,6 +11,7 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
+// Config validates and wires the runtime's dependencies.
 type Config struct {
 	AppName          string
 	Model            string

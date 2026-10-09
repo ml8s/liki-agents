@@ -37,10 +37,10 @@ help:
 	@echo "make validate - validate the AgentDeployment artifact without starting the server"
 
 fmt:
-	gofmt -w cmd internal contracts tests
+	golangci-lint fmt ./...
 
 fmt-check:
-	@files="$$(gofmt -l cmd internal contracts tests)"; if [ -n "$$files" ]; then echo "unformatted files:"; echo "$$files"; exit 1; fi
+	golangci-lint fmt --diff ./...
 
 lint-readme:
 	$(NPM) run lint:docs

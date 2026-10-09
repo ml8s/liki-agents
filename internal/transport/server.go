@@ -14,7 +14,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
 
 	"github.com/ml8s/liki-agents/internal/domain"
 	"github.com/ml8s/liki-agents/internal/observability"
@@ -23,6 +22,8 @@ import (
 	"github.com/ml8s/liki-agents/internal/platform/identity"
 )
 
+// Services bundles the protocol and operational handlers the transport
+// composes.
 type Services struct {
 	AgentCard     http.Handler
 	A2A           http.Handler
@@ -35,6 +36,8 @@ type Services struct {
 	Logger        *slog.Logger
 }
 
+// Server owns the HTTP routing, authentication, throttling, and readiness
+// surface.
 type Server struct {
 	services     Services
 	routes       *http.ServeMux
@@ -109,6 +112,7 @@ func (l *authFailureLimiter) pruneLocked(now time.Time) {
 	}
 }
 
+// New composes the standard protocol and operational endpoints.
 func New(services Services) (*Server, error) {
 	if services.AgentCard == nil || services.A2A == nil || services.AGUI == nil {
 		return nil, fmt.Errorf("A2A and AG-UI protocol handlers are required")
@@ -137,10 +141,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !validRequestID(requestID) {
 		requestID = randomID()
 	}
-	r = r.WithContext(identity.WithIdentity(r.Context(), verifiedIdentity(r)))
 	writer := &responseWriter{ResponseWriter: w, status: http.StatusOK}
 	writer.Header().Set("X-Request-ID", requestID)
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
+
+	// The verified user identity header is a liki-web AG-UI trust boundary. It
+	// is only adopted on /ag-ui; A2A machine callers sharing the internal token
+	// must not be able to spoof a user identity into audit/provenance.
+	if r.URL.Path == "/ag-ui" {
+		r = r.WithContext(identity.WithIdentity(r.Context(), verifiedIdentity(r)))
+	}
 
 	s.routes.ServeHTTP(writer, r)
 	s.observe(r.URL.Path, r.Method, writer.status, time.Since(start))
@@ -303,15 +313,7 @@ func verifiedIdentity(r *http.Request) identity.Identity {
 }
 
 func validRequestID(value string) bool {
-	if value == "" || len(value) > 128 {
-		return false
-	}
-	for _, char := range value {
-		if !unicode.IsPrint(char) {
-			return false
-		}
-	}
-	return true
+	return domain.ValidIdentifier(value)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

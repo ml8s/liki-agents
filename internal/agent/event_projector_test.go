@@ -150,3 +150,58 @@ func plainTextDeployment() *Deployment {
 		}}},
 	}
 }
+
+func structuredTextDeployment() *Deployment {
+	return &Deployment{
+		Metadata: DeploymentMetadata{Name: "test", Version: "1.0.0"},
+		Spec: DeploymentSpec{Agents: []AgentDefinition{{
+			Name:        "main",
+			Version:     "1.0.0",
+			Description: "structured agent",
+			Mode:        AgentModeChat,
+			Instruction: FileReference{Path: "instruction.md"},
+			Output: OutputDefinition{
+				Schema:      FileReference{Path: "schema.json"},
+				TextPointer: "/answer",
+			},
+			Tools: ToolAllowlist{Allow: map[string][]string{}},
+		}}},
+	}
+}
+
+func TestExposesModelText(t *testing.T) {
+	plain := plainTextDeployment().Spec.Agents[0]
+	structured := structuredTextDeployment().Spec.Agents[0]
+	testCases := []struct {
+		name       string
+		definition *AgentDefinition
+		want       bool
+	}{
+		{name: "nil definition", definition: nil, want: false},
+		{name: "plain agent", definition: &plain, want: true},
+		{name: "structured agent", definition: &structured, want: false},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := ExposesModelText(testCase.definition); got != testCase.want {
+				t.Fatalf("ExposesModelText() = %v, want %v", got, testCase.want)
+			}
+		})
+	}
+}
+
+// TestEventProjectorExposeDecisionMatchesRule locks the projector to the single
+// visibility policy so a protocol adapter cannot silently diverge from it.
+func TestEventProjectorExposeDecisionMatchesRule(t *testing.T) {
+	for _, deployment := range []*Deployment{plainTextDeployment(), structuredTextDeployment()} {
+		entrypoint := deployment.Spec.Agents[0]
+		projector := newEventProjector(deployment)
+		definition, expose := projector.definitionFor(entrypoint.Name)
+		if definition == nil {
+			t.Fatalf("definitionFor(%q) returned nil for structured=%v", entrypoint.Name, entrypoint.Output.Structured())
+		}
+		if expose != ExposesModelText(&entrypoint) {
+			t.Fatalf("projector expose = %v, ExposesModelText = %v", expose, ExposesModelText(&entrypoint))
+		}
+	}
+}

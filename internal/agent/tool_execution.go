@@ -45,9 +45,8 @@ type ToolExecutionAuditor struct {
 	now      func() time.Time
 	provider string
 
-	deployment *Deployment
-	agents     map[string]*AgentDefinition
-	scope      func(sessionID string) (*llmRunScope, bool)
+	agents map[string]*AgentDefinition
+	scope  func(sessionID string) (*llmRunScope, bool)
 
 	mu      sync.Mutex
 	pending map[string]ToolExecutionRecord
@@ -67,14 +66,13 @@ func newToolExecutionAuditor(
 		agents[definition.Name] = definition
 	}
 	return &ToolExecutionAuditor{
-		recorder:   recorder,
-		metrics:    metrics,
-		now:        now,
-		provider:   provider,
-		deployment: deployment,
-		agents:     agents,
-		scope:      scope,
-		pending:    make(map[string]ToolExecutionRecord),
+		recorder: recorder,
+		metrics:  metrics,
+		now:      now,
+		provider: provider,
+		agents:   agents,
+		scope:    scope,
+		pending:  make(map[string]ToolExecutionRecord),
 	}
 }
 
@@ -91,6 +89,10 @@ func (a *ToolExecutionAuditor) BeforeTool(
 	if ctx == nil || tool == nil {
 		return args, domain.NewError(domain.CodeToolCallInvalid, "tool callback context and tool are required", nil)
 	}
+	scope, ok := a.scope(ctx.SessionID())
+	if !ok {
+		return args, domain.NewError(domain.CodeAuditSessionRequired, "tool execution has no audit scope", nil)
+	}
 	record, err := a.startedRecord(ctx, tool, args)
 	if err != nil {
 		return args, err
@@ -99,7 +101,7 @@ func (a *ToolExecutionAuditor) BeforeTool(
 	a.mu.Lock()
 	a.pending[key] = record
 	a.mu.Unlock()
-	if auditErr := a.record(ctx, record, audit.EventToolCallStarted); auditErr != nil {
+	if auditErr := a.record(ctx, scope, record, audit.EventToolCallStarted); auditErr != nil {
 		a.mu.Lock()
 		delete(a.pending, key)
 		a.mu.Unlock()
@@ -112,7 +114,7 @@ func (a *ToolExecutionAuditor) BeforeTool(
 func (a *ToolExecutionAuditor) AfterTool(
 	ctx adkagent.Context,
 	tool tool.Tool,
-	args map[string]any,
+	_ map[string]any,
 	result map[string]any,
 	err error,
 ) (map[string]any, error) {
@@ -121,6 +123,10 @@ func (a *ToolExecutionAuditor) AfterTool(
 	}
 	if ctx == nil || tool == nil {
 		return result, domain.NewError(domain.CodeToolCallInvalid, "tool callback context and tool are required", nil)
+	}
+	scope, ok := a.scope(ctx.SessionID())
+	if !ok {
+		return result, domain.NewError(domain.CodeAuditSessionRequired, "tool execution has no audit scope", nil)
 	}
 	key := a.pendingKey(ctx, ctx.FunctionCallID())
 	a.mu.Lock()
@@ -150,7 +156,7 @@ func (a *ToolExecutionAuditor) AfterTool(
 	if record.Status == audit.StatusFailed {
 		eventType = audit.EventToolCallFailed
 	}
-	if auditErr := a.record(ctx, record, eventType); auditErr != nil {
+	if auditErr := a.record(ctx, scope, record, eventType); auditErr != nil {
 		// Keep the started invocation pending so Runtime.Run's terminal
 		// reconciliation can emit a terminal event after a transient failure.
 		return result, auditErr
@@ -167,37 +173,38 @@ func (a *ToolExecutionAuditor) AfterTool(
 }
 
 // FailPending reconciles tool invocations that never reached AfterTool because
-// the run failed, was cancelled, or its event stream terminated early.
+// the run failed, was cancelled, or its event stream terminated early. A record
+// is dequeued only after its terminal evidence is durably appended, so a
+// transient failure stays retryable by the run's cleanup callback.
 func (a *ToolExecutionAuditor) FailPending(
 	ctx context.Context,
 	scope *llmRunScope,
 ) error {
 	a.mu.Lock()
-	var pending map[string]ToolExecutionRecord
-	if scope == nil {
-		pending = a.pending
-		a.pending = make(map[string]ToolExecutionRecord)
-	} else {
-		pending = make(map[string]ToolExecutionRecord)
-		for key, record := range a.pending {
-			if string(record.RunID) == string(scope.runID) {
-				pending[key] = record
-				delete(a.pending, key)
-			}
+	pending := make(map[string]ToolExecutionRecord)
+	for key, record := range a.pending {
+		if scope == nil || string(record.RunID) == string(scope.runID) {
+			pending[key] = record
 		}
 	}
 	a.mu.Unlock()
 
 	var firstErr error
-	for _, record := range pending {
+	for key, record := range pending {
 		record.FinishedAt = a.now()
 		record.DurationMS = record.FinishedAt.Sub(record.StartedAt).Milliseconds()
 		record.Status = audit.StatusFailed
 		record.ErrorCode = domain.CodeToolExecutionInterrupted
 		record.ErrorMessage = "tool execution interrupted by run end"
-		if auditErr := a.recordWithScope(ctx, scope, record, audit.EventToolCallFailed); auditErr != nil && firstErr == nil {
-			firstErr = auditErr
+		if auditErr := a.record(ctx, scope, record, audit.EventToolCallFailed); auditErr != nil {
+			if firstErr == nil {
+				firstErr = auditErr
+			}
+			continue
 		}
+		a.mu.Lock()
+		delete(a.pending, key)
+		a.mu.Unlock()
 		if a.metrics != nil {
 			a.metrics.ObserveToolCall(record.AgentName, record.Tool, string(record.Status), time.Duration(record.DurationMS)*time.Millisecond)
 		}
@@ -248,70 +255,10 @@ func (a *ToolExecutionAuditor) startedRecord(
 	return record, nil
 }
 
+// record appends one tool-call lifecycle event. It serves both the ADK
+// callbacks (started/completed/failed) and end-of-run reconciliation, so a
+// missing scope fails closed instead of dropping evidence.
 func (a *ToolExecutionAuditor) record(
-	ctx adkagent.Context,
-	record ToolExecutionRecord,
-	eventType audit.EventType,
-) error {
-	scope, ok := a.scope(ctx.SessionID())
-	if !ok {
-		return domain.NewError(domain.CodeAuditSessionRequired, "tool execution has no audit scope", nil)
-	}
-	definition, ok := a.agents[record.AgentName]
-	if !ok {
-		return domain.NewError(domain.CodeAgentDefinitionInvalid, fmt.Sprintf("tool execution agent %q is not deployed", record.AgentName), nil)
-	}
-	status := audit.StatusRunning
-	switch eventType {
-	case audit.EventToolCallCompleted:
-		status = audit.StatusSucceeded
-	case audit.EventToolCallFailed:
-		status = audit.StatusFailed
-	}
-	event := audit.Event{
-		ID:                    fmt.Sprintf("%s/%s/%s:%s", scope.runID, record.AgentName, record.CallID, eventType),
-		SchemaVersion:         audit.SchemaV1,
-		Type:                  eventType,
-		OccurredAt:            record.StartedAt,
-		RootRunID:             scope.runID,
-		RunID:                 scope.runID,
-		ThreadID:              scope.threadID,
-		UserID:                scope.userID,
-		Protocol:              scope.protocol,
-		AgentName:             record.AgentName,
-		AgentVersion:          record.AgentVersion,
-		AgentDefinitionDigest: definition.Digest,
-		DefinitionName:        a.deployment.Metadata.Name,
-		DefinitionVersion:     a.deployment.Metadata.Version,
-		DefinitionDigest:      a.deployment.Digest,
-		ToolCallID:            record.CallID,
-		ToolName:              record.Tool,
-		Model:                 scope.model,
-		Provider:              a.provider,
-		Status:                status,
-		TraceID:               traceIDFromContext(ctx),
-		SpanID:                spanIDFromContext(ctx),
-		DurationMS:            record.DurationMS,
-		ErrorCode:             record.ErrorCode,
-		ErrorMessage:          record.ErrorMessage,
-		Payload: map[string]any{
-			"mcp_server":    record.MCPServer,
-			"input_digest":  record.InputDigest,
-			"input_bytes":   record.InputBytes,
-			"output_digest": record.OutputDigest,
-			"output_bytes":  record.OutputBytes,
-		},
-	}
-	if eventType != audit.EventToolCallStarted {
-		event.OccurredAt = record.FinishedAt
-	}
-	if err := event.Validate(); err != nil {
-		return err
-	}
-	return a.recorder.Record(context.WithoutCancel(ctx), &event)
-}
-
-func (a *ToolExecutionAuditor) recordWithScope(
 	ctx context.Context,
 	scope *llmRunScope,
 	record ToolExecutionRecord,
@@ -324,38 +271,40 @@ func (a *ToolExecutionAuditor) recordWithScope(
 	if !ok {
 		return domain.NewError(domain.CodeAgentDefinitionInvalid, fmt.Sprintf("tool execution agent %q is not deployed", record.AgentName), nil)
 	}
-	status := audit.StatusFailed
-	event := audit.Event{
-		ID:                    fmt.Sprintf("%s/%s/%s:%s", scope.runID, record.AgentName, record.CallID, eventType),
-		SchemaVersion:         audit.SchemaV1,
-		Type:                  eventType,
-		OccurredAt:            record.FinishedAt,
-		RootRunID:             scope.runID,
-		RunID:                 scope.runID,
-		ThreadID:              scope.threadID,
-		UserID:                scope.userID,
-		Protocol:              scope.protocol,
-		AgentName:             record.AgentName,
-		AgentVersion:          record.AgentVersion,
-		AgentDefinitionDigest: definition.Digest,
-		DefinitionName:        a.deployment.Metadata.Name,
-		DefinitionVersion:     a.deployment.Metadata.Version,
-		DefinitionDigest:      a.deployment.Digest,
-		ToolCallID:            record.CallID,
-		ToolName:              record.Tool,
-		Model:                 scope.model,
-		Provider:              a.provider,
-		Status:                status,
-		DurationMS:            record.DurationMS,
-		ErrorCode:             record.ErrorCode,
-		ErrorMessage:          record.ErrorMessage,
-		Payload: map[string]any{
-			"mcp_server":    record.MCPServer,
-			"input_digest":  record.InputDigest,
-			"input_bytes":   record.InputBytes,
-			"output_digest": record.OutputDigest,
-			"output_bytes":  record.OutputBytes,
-		},
+	status := audit.StatusRunning
+	switch eventType {
+	case audit.EventToolCallCompleted:
+		status = audit.StatusSucceeded
+	case audit.EventToolCallFailed:
+		status = audit.StatusFailed
+	}
+	event := scopedEvent(scope)
+	event.ID = fmt.Sprintf("%s/%s/%s:%s", scope.runID, record.AgentName, record.CallID, eventType)
+	event.Type = eventType
+	event.AgentName = record.AgentName
+	event.AgentVersion = record.AgentVersion
+	event.AgentDefinitionDigest = definition.Digest
+	event.ToolCallID = record.CallID
+	event.ToolName = record.Tool
+	event.Model = scope.model
+	event.Provider = a.provider
+	event.Status = status
+	event.TraceID = traceIDFromContext(ctx)
+	event.SpanID = spanIDFromContext(ctx)
+	event.DurationMS = record.DurationMS
+	event.ErrorCode = record.ErrorCode
+	event.ErrorMessage = record.ErrorMessage
+	event.Payload = map[string]any{
+		"mcp_server":    record.MCPServer,
+		"input_digest":  record.InputDigest,
+		"input_bytes":   record.InputBytes,
+		"output_digest": record.OutputDigest,
+		"output_bytes":  record.OutputBytes,
+	}
+	if eventType == audit.EventToolCallStarted {
+		event.OccurredAt = record.StartedAt
+	} else {
+		event.OccurredAt = record.FinishedAt
 	}
 	if err := event.Validate(); err != nil {
 		return err

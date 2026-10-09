@@ -11,7 +11,7 @@ func TestDeploymentDigestCoversExternalArtifactsAndGraphSemantics(t *testing.T) 
 	root := t.TempDir()
 	base := writeDeployment(t, root, validManifest())
 
-	if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("changed generic instruction"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("changed generic instruction"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	instructionChanged, err := LoadAgentDeployment(filepath.Join(root, "agent-deployment.json"))
@@ -22,7 +22,7 @@ func TestDeploymentDigestCoversExternalArtifactsAndGraphSemantics(t *testing.T) 
 		t.Fatal("deployment digest did not cover instruction artifact")
 	}
 
-	if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(`{
@@ -30,7 +30,7 @@ func TestDeploymentDigestCoversExternalArtifactsAndGraphSemantics(t *testing.T) 
 		"additionalProperties": false,
 		"required": ["answer", "extra"],
 		"properties": {"answer": {"type": "string"}, "extra": {"type": "string"}}
-	}`), 0600); err != nil {
+	}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	schemaChanged, err := LoadAgentDeployment(filepath.Join(root, "agent-deployment.json"))

@@ -91,7 +91,7 @@ func (p eventProjector) projectFinal(
 		projected.Content = nil
 		return &projected
 	}
-	if definition != nil && definition.Output.Structured() {
+	if definition != nil && !ExposesModelText(definition) {
 		exposeModelText = false
 	}
 	if definition == nil {
@@ -152,7 +152,7 @@ func (p eventProjector) definitionFor(author string) (*AgentDefinition, bool) {
 	if !ok || definition == nil {
 		return nil, false
 	}
-	return definition, !definition.Output.Structured()
+	return definition, ExposesModelText(definition)
 }
 
 func nonThoughtTextParts(event *session.Event) []*genai.Part {

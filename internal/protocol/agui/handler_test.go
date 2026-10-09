@@ -20,10 +20,9 @@ import (
 	"google.golang.org/genai"
 )
 
-type recordingAuditEvents struct {
-}
+type recordingAuditEvents struct{}
 
-func (r *recordingAuditEvents) Record(_ context.Context, event *audit.Event) error {
+func (r *recordingAuditEvents) Record(_ context.Context, _ *audit.Event) error {
 	return nil
 }
 
@@ -276,13 +275,17 @@ func TestAGUIEmitsRunErrorOnDeadline(t *testing.T) {
 func TestAGUIEmitsFullToolCallSequenceWithStructuredAnswer(t *testing.T) {
 	events := []*session.Event{
 		{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{
-			{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "engine_tool_a", Args: map[string]any{"input_a": "value-a"}}}}}}},
+			{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "engine_tool_a", Args: map[string]any{"input_a": "value-a"}}},
+		}}}},
 		{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{
-			{FunctionCall: &genai.FunctionCall{ID: "call_2", Name: "engine_tool_b", Args: map[string]any{"input_b": "value-b"}}}}}}},
+			{FunctionCall: &genai.FunctionCall{ID: "call_2", Name: "engine_tool_b", Args: map[string]any{"input_b": "value-b"}}},
+		}}}},
 		{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{
-			{FunctionResponse: &genai.FunctionResponse{ID: "call_1", Name: "engine_tool_a", Response: map[string]any{"result_a": "value-a"}}}}}}},
+			{FunctionResponse: &genai.FunctionResponse{ID: "call_1", Name: "engine_tool_a", Response: map[string]any{"result_a": "value-a"}}},
+		}}}},
 		{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{
-			{FunctionResponse: &genai.FunctionResponse{ID: "call_2", Name: "engine_tool_b", Response: map[string]any{"result_b": "value-b"}}}}}}},
+			{FunctionResponse: &genai.FunctionResponse{ID: "call_2", Name: "engine_tool_b", Response: map[string]any{"result_b": "value-b"}}},
+		}}}},
 		{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "最终分析"}}}}},
 	}
 	runtime := &scriptedRuntime{
@@ -302,8 +305,7 @@ func TestAGUIEmitsFullToolCallSequenceWithStructuredAnswer(t *testing.T) {
 	body := response.Body.String()
 	want := []string{
 		"RUN_STARTED",
-		"TOOL_CALL_START", "TOOL_CALL_ARGS",
-		"TOOL_CALL_RESULT", "TOOL_CALL_END",
+		"TOOL_CALL_START", "TOOL_CALL_ARGS", "TOOL_CALL_END", "TOOL_CALL_RESULT",
 		"RUN_FINISHED",
 	}
 	last := -1

@@ -73,6 +73,12 @@ services:
     restart: "no"
     init: true
     stop_grace_period: 35s
+    healthcheck:
+      test: ["CMD", "/liki-agents", "healthcheck"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
     deploy:
       resources:
         limits:

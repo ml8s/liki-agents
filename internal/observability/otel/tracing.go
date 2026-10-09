@@ -84,6 +84,7 @@ func NewTracerProvider(ctx context.Context, serviceName, serviceVersion, environ
 	}, nil
 }
 
+// Tracer returns a named tracer from the active provider.
 func (p *TracerProvider) Tracer(name string, options ...trace.TracerOption) trace.Tracer {
 	if p == nil || p.provider == nil {
 		return tracenoop.NewTracerProvider().Tracer(name)
@@ -91,6 +92,7 @@ func (p *TracerProvider) Tracer(name string, options ...trace.TracerOption) trac
 	return p.provider.Tracer(name, options...)
 }
 
+// Shutdown flushes and closes the trace provider.
 func (p *TracerProvider) Shutdown(ctx context.Context) error {
 	if p == nil || p.shutdown == nil {
 		return nil
@@ -98,6 +100,8 @@ func (p *TracerProvider) Shutdown(ctx context.Context) error {
 	return p.shutdown(ctx)
 }
 
+// Provider returns the standard tracer provider, or a no-op when tracing is
+// disabled.
 func (p *TracerProvider) Provider() trace.TracerProvider {
 	if p == nil || p.provider == nil {
 		return p.noop
@@ -163,6 +167,7 @@ func InstallGlobalPropagator() {
 	))
 }
 
+// Propagator returns the W3C trace-context and baggage propagator.
 func Propagator() propagation.TextMapPropagator {
 	return propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},

@@ -8,21 +8,25 @@ import (
 	"strings"
 )
 
+// Identity is the verified caller identity propagated across service
+// boundaries.
 type Identity struct {
 	UserID string
-	Scopes []string
 }
 
+// IsZero reports whether the identity carries no verified subject.
 func (i Identity) IsZero() bool {
 	return strings.TrimSpace(i.UserID) == ""
 }
 
 type contextKey struct{}
 
+// WithIdentity returns a context carrying the verified identity.
 func WithIdentity(ctx context.Context, subject Identity) context.Context {
 	return context.WithValue(ctx, contextKey{}, subject)
 }
 
+// FromContext returns the verified identity, if present.
 func FromContext(ctx context.Context) (Identity, bool) {
 	identity, ok := ctx.Value(contextKey{}).(Identity)
 	if !ok || identity.IsZero() {
@@ -31,6 +35,7 @@ func FromContext(ctx context.Context) (Identity, bool) {
 	return identity, true
 }
 
+// UserIDFromContext returns the verified user id, if present.
 func UserIDFromContext(ctx context.Context) (string, bool) {
 	identity, ok := FromContext(ctx)
 	if !ok {

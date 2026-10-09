@@ -41,7 +41,6 @@ type AgentReferenceAuditor struct {
 	recorder   audit.Recorder
 	metrics    Metrics
 	now        func() time.Time
-	deployment *Deployment
 	entrypoint string
 	agents     map[string]*AgentDefinition
 	scope      func(sessionID string) (*llmRunScope, bool)
@@ -67,7 +66,6 @@ func newAgentReferenceAuditor(
 		recorder:   recorder,
 		metrics:    metrics,
 		now:        now,
-		deployment: deployment,
 		entrypoint: entrypoint,
 		agents:     agents,
 		scope:      scope,
@@ -143,20 +141,15 @@ func (a *AgentReferenceAuditor) AfterAgent(ctx adkagent.Context) (*genai.Content
 }
 
 // FailPending reconciles delegated invocations that never reached AfterAgent
-// because the run failed or was cancelled.
-func (a *AgentReferenceAuditor) FailPending(ctx context.Context, scope *llmRunScope, cause error) error {
+// because the run failed or was cancelled. A record is dequeued only after its
+// terminal evidence is durably appended, so a transient failure stays
+// retryable by the run's cleanup callback.
+func (a *AgentReferenceAuditor) FailPending(ctx context.Context, scope *llmRunScope, _ error) error {
 	a.mu.Lock()
-	var pending map[string]DelegationExecutionRecord
-	if scope == nil {
-		pending = a.pending
-		a.pending = make(map[string]DelegationExecutionRecord)
-	} else {
-		pending = make(map[string]DelegationExecutionRecord)
-		for key, record := range a.pending {
-			if string(record.RunID) == string(scope.runID) {
-				pending[key] = record
-				delete(a.pending, key)
-			}
+	pending := make(map[string]DelegationExecutionRecord)
+	for key, record := range a.pending {
+		if scope == nil || string(record.RunID) == string(scope.runID) {
+			pending[key] = record
 		}
 	}
 	a.mu.Unlock()
@@ -168,13 +161,18 @@ func (a *AgentReferenceAuditor) FailPending(ctx context.Context, scope *llmRunSc
 		record.Status = audit.StatusFailed
 		record.ErrorCode = domain.CodeDelegationFailed
 		record.ErrorMessage = "agent delegation interrupted by run end"
-		if auditErr := a.record(ctx, scope, record, audit.EventDelegationFailed); auditErr != nil && firstErr == nil {
-			firstErr = auditErr
+		if auditErr := a.record(ctx, scope, record, audit.EventDelegationFailed); auditErr != nil {
+			if firstErr == nil {
+				firstErr = auditErr
+			}
+			continue
 		}
+		a.mu.Lock()
+		delete(a.pending, key)
+		a.mu.Unlock()
 		if a.metrics != nil {
 			a.metrics.ObserveAgentDelegation(record.CallerAgent, record.TargetAgent, string(record.Status), time.Duration(record.DurationMS)*time.Millisecond)
 		}
-		_ = key
 	}
 	return firstErr
 }
@@ -223,38 +221,29 @@ func (a *AgentReferenceAuditor) record(ctx context.Context, scope *llmRunScope, 
 		status = audit.StatusFailed
 	}
 	sc := trace.SpanContextFromContext(ctx)
-	event := audit.Event{
-		TraceID:               sc.TraceID().String(),
-		SpanID:                sc.SpanID().String(),
-		ID:                    fmt.Sprintf("%s/%s:%s", scope.runID, record.AgentPath, eventType),
-		SchemaVersion:         audit.SchemaV1,
-		Type:                  eventType,
-		OccurredAt:            record.StartedAt,
-		RootRunID:             scope.runID,
-		RunID:                 scope.runID,
-		ParentRunID:           scope.runID,
-		ThreadID:              scope.threadID,
-		UserID:                scope.userID,
-		Protocol:              scope.protocol,
-		AgentName:             record.TargetAgent,
-		AgentVersion:          target.Version,
-		AgentDefinitionDigest: target.Digest,
-		DefinitionName:        a.deployment.Metadata.Name,
-		DefinitionVersion:     a.deployment.Metadata.Version,
-		DefinitionDigest:      a.deployment.Digest,
-		CallerAgent:           record.CallerAgent,
-		TargetAgent:           record.TargetAgent,
-		DelegationDepth:       record.Depth,
-		Status:                status,
-		DurationMS:            record.DurationMS,
-		ErrorCode:             record.ErrorCode,
-		ErrorMessage:          record.ErrorMessage,
-		Payload: map[string]any{
-			"agent_path": record.AgentPath,
-		},
+	event := scopedEvent(scope)
+	event.ID = fmt.Sprintf("%s/%s:%s", scope.runID, record.AgentPath, eventType)
+	event.Type = eventType
+	event.TraceID = sc.TraceID().String()
+	event.SpanID = sc.SpanID().String()
+	event.AgentName = record.TargetAgent
+	event.AgentVersion = target.Version
+	event.AgentDefinitionDigest = target.Digest
+	event.CallerAgent = record.CallerAgent
+	event.TargetAgent = record.TargetAgent
+	event.DelegationDepth = record.Depth
+	event.ParentRunID = scope.runID
+	event.Status = status
+	event.DurationMS = record.DurationMS
+	event.ErrorCode = record.ErrorCode
+	event.ErrorMessage = record.ErrorMessage
+	event.Payload = map[string]any{
+		"agent_path": record.AgentPath,
 	}
 	if eventType != audit.EventDelegationStarted {
 		event.OccurredAt = record.FinishedAt
+	} else {
+		event.OccurredAt = record.StartedAt
 	}
 	if err := event.Validate(); err != nil {
 		return err
@@ -266,7 +255,7 @@ func (a *AgentReferenceAuditor) pendingKey(ctx adkagent.Context) string {
 	return ctx.SessionID() + "\x00" + ctx.Branch() + "\x00" + ctx.AgentName() + "\x00" + ctx.InvocationID()
 }
 
-func callerFromAgentPath(path, target, entrypoint string) (string, int) {
+func callerFromAgentPath(path, _, entrypoint string) (string, int) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return entrypoint, 0

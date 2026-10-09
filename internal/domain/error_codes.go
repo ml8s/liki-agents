@@ -26,9 +26,6 @@ const (
 	CodeMCPToolsUnavailable               = "mcp_tools_unavailable"
 	CodeToolCallIDRequired                = "tool_call_id_required"
 	CodeToolNameRequired                  = "tool_name_required"
-	CodeToolStartedAtRequired             = "tool_started_at_required"
-	CodeToolFinishedAtRequired            = "tool_finished_at_required"
-	CodeToolDurationInvalid               = "tool_duration_invalid"
 	CodeToolCallInvalid                   = "tool_call_invalid"
 	CodeToolCallUnknown                   = "tool_call_unknown"
 	CodeToolProvenanceInvalid             = "tool_provenance_invalid"
@@ -78,12 +75,4 @@ const (
 // Structured output model adapter codes (internal/agent/structured_output.go)
 const (
 	CodeLLMRequestInvalid = "llm_request_invalid"
-)
-
-// Deprecated aliases preserve stable identifiers that were published before
-// the Engine-specific runtime boundary was generalized to arbitrary MCP servers.
-const (
-	CodeEngineMCPURLMissing    = CodeMCPEndpointEnvMissing
-	CodeEngineToolsUnavailable = CodeMCPToolsUnavailable
-	CodeAuditStoreFailed       = "audit_store_failed"
 )

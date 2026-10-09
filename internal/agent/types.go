@@ -3,32 +3,32 @@ package agent
 import (
 	"encoding/json"
 	"time"
-	"unicode"
 
 	"github.com/ml8s/liki-agents/internal/domain"
 )
 
+// Role is a conversation-message role.
 type Role string
 
+// Conversation message roles.
 const (
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"
 )
 
+// MaxHistoryMessages prevents a protocol history from becoming an
+// unbounded reconstructed prompt.
 const (
-	// MaxIdentifierLength bounds untrusted identifiers before they reach ADK,
-	// audit storage, tracing, and in-memory lifecycle maps.
-	MaxIdentifierLength = 128
-	// MaxHistoryMessages prevents a protocol history from becoming an
-	// unbounded reconstructed prompt.
 	MaxHistoryMessages = 100
 )
 
+// Message is one conversation-history turn passed into a run.
 type Message struct {
 	Role    Role
 	Content string
 }
 
+// RunRequest is the runtime-neutral input of one execution.
 type RunRequest struct {
 	RunID       string
 	ThreadID    string
@@ -39,6 +39,7 @@ type RunRequest struct {
 	Context     json.RawMessage
 }
 
+// RunResult is the validated outcome of one execution.
 type RunResult struct {
 	Definition DefinitionRef
 	Output     json.RawMessage
@@ -52,6 +53,7 @@ func StructuredOutputStateKey(agentName string) string {
 	return structuredOutputStateKeyPrefix + agentName
 }
 
+// Metrics is the runtime observation contract for execution evidence.
 type Metrics interface {
 	ObserveLLMCall(model, status string, usage domain.LLMTokenUsage)
 	ObserveToolCall(agent, tool, status string, duration time.Duration)
@@ -61,13 +63,5 @@ type Metrics interface {
 // ValidIdentifier accepts bounded printable identifiers while preserving
 // provider-specific identifier alphabets.
 func ValidIdentifier(value string) bool {
-	if value == "" || len(value) > MaxIdentifierLength {
-		return false
-	}
-	for _, char := range value {
-		if !unicode.IsPrint(char) {
-			return false
-		}
-	}
-	return true
+	return domain.ValidIdentifier(value)
 }

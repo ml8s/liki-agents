@@ -11,10 +11,11 @@ import (
 	"github.com/ml8s/liki-agents/internal/domain"
 )
 
-const (
-	// SchemaV1 is the stable contract for all v1 audit events.
-	SchemaV1 = "audit.liki/v1"
+// SchemaV1 is the stable contract for all v1 audit events.
+const SchemaV1 = "audit.liki/v1"
 
+// Audit event type identifiers.
+const (
 	EventRunStarted          EventType = "run.started"
 	EventRunCompleted        EventType = "run.completed"
 	EventRunFailed           EventType = "run.failed"
@@ -35,6 +36,7 @@ type EventType string
 // Status is the outcome represented by a lifecycle event.
 type Status string
 
+// Audit event statuses.
 const (
 	StatusRunning   Status = "running"
 	StatusSucceeded Status = "succeeded"
@@ -75,6 +77,7 @@ type Event struct {
 	Payload               map[string]any
 }
 
+// Normalize trims whitespace from identifier fields.
 func (e *Event) Normalize() {
 	e.ID = strings.TrimSpace(e.ID)
 	e.SchemaVersion = strings.TrimSpace(e.SchemaVersion)
@@ -93,6 +96,7 @@ func (e *Event) Normalize() {
 	e.ErrorCode = strings.TrimSpace(e.ErrorCode)
 }
 
+// Validate reports whether the event carries the required lifecycle evidence.
 func (e *Event) Validate() error {
 	e.Normalize()
 	switch {
@@ -210,6 +214,7 @@ func isHex(value string) bool {
 	return true
 }
 
+// NewError builds a coded audit error consistent with the domain error type.
 func NewError(code string, message string, cause ...error) error {
 	var wrapped error
 	if len(cause) > 0 {

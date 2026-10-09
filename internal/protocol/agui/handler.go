@@ -23,6 +23,7 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
+// Config owns the AG-UI adapter settings.
 type Config struct {
 	RunTimeout time.Duration
 	Metrics    observability.ProtocolMetrics
@@ -251,6 +252,14 @@ func (s *stream) consume(event *session.Event, emit func(aguievents.Event) error
 		if err := emit(argsEvent); err != nil {
 			return err
 		}
+		// AG-UI tool-call lifecycle: START -> ARGS -> END -> RESULT. END closes
+		// the argument stream as soon as the call is specified, so a call whose
+		// response never arrives is not left dangling.
+		endEvent := aguievents.NewToolCallEndEvent(callID)
+		endEvent.SubagentRunID = subagentID
+		if err := emit(endEvent); err != nil {
+			return err
+		}
 	}
 
 	for _, part := range event.Content.Parts {
@@ -269,11 +278,6 @@ func (s *stream) consume(event *session.Event, emit func(aguievents.Event) error
 		resultEvent := aguievents.NewToolCallResultEvent(s.runID+":tools", responseID, string(payload))
 		resultEvent.SubagentRunID = subagentID
 		if err := emit(resultEvent); err != nil {
-			return err
-		}
-		endEvent := aguievents.NewToolCallEndEvent(responseID)
-		endEvent.SubagentRunID = subagentID
-		if err := emit(endEvent); err != nil {
 			return err
 		}
 		delete(s.toolIDs, response.Name)

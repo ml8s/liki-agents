@@ -12,6 +12,7 @@ import (
 	"github.com/ml8s/liki-agents/internal/domain"
 	"github.com/ml8s/liki-agents/internal/observability"
 	"github.com/ml8s/liki-agents/internal/platform"
+	"github.com/ml8s/liki-agents/internal/platform/identity"
 	"github.com/ml8s/liki-agents/internal/transport"
 )
 
@@ -380,4 +381,40 @@ func (contextAwareChecker) CheckHealth(ctx context.Context) platform.DependencyH
 
 func (c *unhealthyChecker) CheckHealth(context.Context) platform.DependencyHealth {
 	return platform.DependencyHealth{Name: c.name, OK: false, Detail: c.detail}
+}
+
+func TestIdentityHeaderOnlyAcceptedOnAGUI(t *testing.T) {
+	var a2aID, aguiID identity.Identity
+	services := transport.Services{
+		AgentCard: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
+		A2A: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if id, ok := identity.FromContext(r.Context()); ok {
+				a2aID = id
+			}
+			w.WriteHeader(http.StatusAccepted)
+		}),
+		AGUI: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if id, ok := identity.FromContext(r.Context()); ok {
+				aguiID = id
+			}
+			w.WriteHeader(http.StatusAccepted)
+		}),
+	}
+	server := mustNewServer(t, services)
+
+	// A2A must not trust the browser-identity header injected for AG-UI.
+	req := httptest.NewRequest(http.MethodPost, "/a2a", nil)
+	req.Header.Set("X-Liki-User-ID", "alice")
+	server.ServeHTTP(httptest.NewRecorder(), req)
+	if !a2aID.IsZero() {
+		t.Fatalf("a2a identity = %+v, want zero (shared-token caller must not spoof users)", a2aID)
+	}
+
+	// AG-UI adopts the verified identity from the header.
+	req2 := httptest.NewRequest(http.MethodPost, "/ag-ui", nil)
+	req2.Header.Set("X-Liki-User-ID", "alice")
+	server.ServeHTTP(httptest.NewRecorder(), req2)
+	if aguiID.IsZero() || aguiID.UserID != "alice" {
+		t.Fatalf("ag-ui identity = %+v, want alice", aguiID)
+	}
 }

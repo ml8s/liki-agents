@@ -78,14 +78,16 @@ Authorization: Bearer <LIKI_AGENTS_INTERNAL_TOKEN>
 ```
 
 AG-UI additionally requires `liki-web` to authenticate the browser user and
-inject:
-
-```text
-X-Liki-User-ID: <verified user id>
-```
+inject `X-Liki-User-ID`. The header is a browser-only trust signal: it is
+adopted on `/ag-ui` only and never on A2A, so a machine client sharing the
+internal token cannot spoof a user identity into audit/provenance.
 
 The runtime is never directly public and never authenticates end users, issues
 sessions, stores product conversations, or trusts unverified browser identities.
+Internet-facing request rate limiting is the gateway's job (Caddy / `liki-web`);
+the runtime's internal per-source limiter serves only token-brute-force
+defense-in-depth, and run concurrency (`LIKI_MAX_CONCURRENT_RUNS`) protects
+runtime resources.
 
 Local development may leave `LIKI_AGENTS_INTERNAL_TOKEN` empty. Bearer
 authentication is then disabled, but AG-UI still requires `X-Liki-User-ID`.
@@ -132,7 +134,8 @@ runtime supports one process/replica; see
 Prometheus exposes protocol latency, active streams, model calls and tokens,
 tool calls and durations, delegation activity, and dependency readiness. Logs
 use `log/slog` with stable event names. Distributed tracing uses W3C context
-propagation and standard OTLP export. Tracing is disabled unless a standard
+propagation and standard OTLP export; MCP and LLM outbound requests carry the
+same trace context. Tracing is disabled unless a standard
 OTLP endpoint is configured:
 
 ```text

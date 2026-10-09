@@ -11,6 +11,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// Metrics is the Prometheus implementation of the protocol and runtime
+// observation contracts.
 type Metrics struct {
 	registry          *prometheus.Registry
 	protocolRequests  *prometheus.CounterVec
@@ -25,6 +27,7 @@ type Metrics struct {
 	dependencyUp      *prometheus.GaugeVec
 }
 
+// New builds a metrics registry with runtime and protocol collectors.
 func New() *Metrics {
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(
@@ -92,15 +95,18 @@ func New() *Metrics {
 	return metrics
 }
 
+// Handler returns the Prometheus scrape handler.
 func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
 }
 
+// ObserveHTTPRequest records one protocol request and its latency.
 func (m *Metrics) ObserveHTTPRequest(protocol, operation, status string, duration time.Duration) {
 	m.protocolRequests.WithLabelValues(protocol, operation, status).Inc()
 	m.protocolLatency.WithLabelValues(protocol, operation).Observe(duration.Seconds())
 }
 
+// ObserveLLMCall records one model call and its token usage.
 func (m *Metrics) ObserveLLMCall(model, status string, usage domain.LLMTokenUsage) {
 	m.llmCalls.WithLabelValues(model, status).Inc()
 	m.llmTokens.WithLabelValues(model, "prompt").Add(float64(usage.PromptTokens))
@@ -109,24 +115,29 @@ func (m *Metrics) ObserveLLMCall(model, status string, usage domain.LLMTokenUsag
 	m.llmTokens.WithLabelValues(model, "total").Add(float64(usage.TotalTokens))
 }
 
+// ObserveToolCall records one tool invocation and its duration.
 func (m *Metrics) ObserveToolCall(agent, tool, status string, duration time.Duration) {
 	m.toolCalls.WithLabelValues(agent, tool, status).Inc()
 	m.toolLatency.WithLabelValues(agent, tool).Observe(duration.Seconds())
 }
 
+// ObserveAgentDelegation records one sub-agent delegation and its duration.
 func (m *Metrics) ObserveAgentDelegation(caller, target, status string, duration time.Duration) {
 	m.delegations.WithLabelValues(caller, target, status).Inc()
 	m.delegationLatency.WithLabelValues(caller, target).Observe(duration.Seconds())
 }
 
+// StreamOpened records a new active protocol stream.
 func (m *Metrics) StreamOpened(protocol string) {
 	m.activeStreams.WithLabelValues(protocol).Inc()
 }
 
+// StreamClosed records the end of an active protocol stream.
 func (m *Metrics) StreamClosed(protocol string) {
 	m.activeStreams.WithLabelValues(protocol).Dec()
 }
 
+// SetDependencyReady records the readiness of one dependency.
 func (m *Metrics) SetDependencyReady(name string, ready bool) {
 	value := 0.0
 	if ready {

@@ -60,6 +60,48 @@ func newAuditRuntime(t *testing.T) (*agent.Runtime, *recordingAuditEvents) {
 	return runtime, events
 }
 
+// flakyRunTerminalAudit injects a configurable number of transient failures for
+// terminal run events, leaving all other audit appends intact.
+type flakyRunTerminalAudit struct {
+	*recordingAuditEvents
+	mu        sync.Mutex
+	remaining int
+}
+
+func (r *flakyRunTerminalAudit) Record(ctx context.Context, event *audit.Event) error {
+	if event != nil && (event.Type == audit.EventRunCompleted || event.Type == audit.EventRunFailed) {
+		r.mu.Lock()
+		if r.remaining > 0 {
+			r.remaining--
+			r.mu.Unlock()
+			return errors.New("transient audit store failure")
+		}
+		r.mu.Unlock()
+	}
+	return r.recordingAuditEvents.Record(ctx, event)
+}
+
+func newAuditRuntimeWith(t *testing.T, recorder audit.Recorder, maxConcurrent int) *agent.Runtime {
+	t.Helper()
+	deployment := agent.NewTestDeployment(t)
+	t.Setenv("TEST_MCP_ENDPOINT", "http://127.0.0.1:9/mcp")
+	runtime, err := agent.NewRuntime(agent.Config{
+		Model:             "test-model",
+		ModelAPIKey:       "test-key",
+		Deployment:        deployment,
+		StructuredOutput:  "json_schema",
+		GraphVersion:      "test-graph",
+		ContractVersion:   "test-contract",
+		Provider:          "test-provider",
+		AuditRecorder:     recorder,
+		MaxConcurrentRuns: maxConcurrent,
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime() error = %v", err)
+	}
+	return runtime
+}
+
 func TestExternalAuditRunLifecycleIsExclusive(t *testing.T) {
 	runtime, events := newAuditRuntime(t)
 	scope := agent.AuditRunScope{RunID: "run_1", ThreadID: "thread_1", UserID: "user_1"}
@@ -165,5 +207,39 @@ func TestExternalAuditRunRecordsDuration(t *testing.T) {
 	completed := events.eventsOfType(audit.EventRunCompleted)
 	if len(completed) != 1 || completed[0].DurationMS <= 0 {
 		t.Fatalf("completed duration = %+v, want positive duration", completed)
+	}
+}
+
+func TestExternalAuditRunRetriesTerminalAppendAndReleasesOnce(t *testing.T) {
+	recorder := &flakyRunTerminalAudit{recordingAuditEvents: &recordingAuditEvents{}, remaining: 2}
+	runtime := newAuditRuntimeWith(t, recorder, 1)
+	ctx := context.Background()
+	scope := agent.AuditRunScope{RunID: "task_retry", ThreadID: "context_1", UserID: "user_1", Protocol: "a2a"}
+	if err := runtime.BeginAuditRun(ctx, "context_1", scope); err != nil {
+		t.Fatalf("BeginAuditRun() error = %v", err)
+	}
+	// The first completion exhausts both append attempts and must not release
+	// the run scope or the single concurrency slot.
+	if err := runtime.EndAuditRun(ctx, "context_1", nil); err == nil {
+		t.Fatal("EndAuditRun() unexpectedly succeeded despite terminal append failure")
+	}
+	if got := len(recorder.eventsOfType(audit.EventRunCompleted)); got != 0 {
+		t.Fatalf("completed events after failure = %d, want 0", got)
+	}
+	// The executor's cleanup callback retries the terminal append and succeeds.
+	if err := runtime.EndAuditRun(ctx, "context_1", nil); err != nil {
+		t.Fatalf("retry EndAuditRun() error = %v", err)
+	}
+	if got := len(recorder.eventsOfType(audit.EventRunCompleted)); got != 1 {
+		t.Fatalf("completed events after retry = %d, want 1", got)
+	}
+	// The slot was released exactly once: a fresh single-slot run acquires it
+	// instead of observing CodeRuntimeBusy (release) or blocking (double release).
+	next := agent.AuditRunScope{RunID: "task_next", ThreadID: "context_2", UserID: "user_1", Protocol: "a2a"}
+	if err := runtime.BeginAuditRun(ctx, "context_2", next); err != nil {
+		t.Fatalf("BeginAuditRun() after release error = %v", err)
+	}
+	if err := runtime.EndAuditRun(ctx, "context_2", nil); err != nil {
+		t.Fatalf("EndAuditRun() after release error = %v", err)
 	}
 }

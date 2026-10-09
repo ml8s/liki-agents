@@ -31,3 +31,4 @@ VOLUME ["/data"]
 EXPOSE 8083
 USER nonroot:nonroot
 ENTRYPOINT ["/liki-agents"]
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD ["/liki-agents", "healthcheck"]

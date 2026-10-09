@@ -1,10 +1,13 @@
 package contracts
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 
@@ -134,5 +137,34 @@ func TestAgentDefinitionReturnsStableSchema(t *testing.T) {
 		if results[i] != first {
 			t.Fatalf("reader %d: resolved schema pointer drifted (sync.Once contract)", i)
 		}
+	}
+}
+
+// TestAgentDefinitionVersionFileMatchesEmbeddedSchemaDigest pins the published
+// contract pointer: the version file's digest must equal the SHA-256 of the
+// embedded schema, so a schema change without a version bump fails the build.
+func TestAgentDefinitionVersionFileMatchesEmbeddedSchemaDigest(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(file), "agent-definition.version"))
+	if err != nil {
+		t.Fatalf("read version file: %v", err)
+	}
+	want := ""
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "digest:") {
+			want = strings.TrimSpace(strings.TrimPrefix(line, "digest:"))
+		}
+	}
+	if want == "" {
+		t.Fatal("version file has no digest line")
+	}
+	sum := sha256.Sum256(agentDefinitionSchema)
+	got := "sha256:" + hex.EncodeToString(sum[:])
+	if got != want {
+		t.Fatalf("embedded schema digest %s does not match declared %s; update contracts/agent-definition.version", got, want)
 	}
 }

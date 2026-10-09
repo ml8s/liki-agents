@@ -1,5 +1,7 @@
-// Package agent: external AgentDeployment artifacts are the only attachment
-// point for domain prompt, output schema, tool allowlist, and Agent identity.
+// Package agent owns the single ADK execution graph, protocol adaptation, and
+// durable audit evidence. External AgentDeployment artifacts are the only
+// attachment point for domain prompts, output schemas, tool allowlists, and
+// Agent identity.
 package agent
 
 import (
@@ -19,10 +21,10 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/ml8s/liki-agents/contracts"
 	jsonpointer "github.com/qri-io/jsonpointer"
-	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/genai"
 )
 
+// AgentDeployment contract constants.
 const (
 	AgentAPIVersion = "agent.liki/v1"
 	AgentKind       = "AgentDeployment"
@@ -32,6 +34,7 @@ const (
 	maxSchemaArtifactBytes = 4 << 20
 )
 
+// Deployment is the validated AgentDeployment artifact and its derived digest.
 type Deployment struct {
 	APIVersion string             `json:"apiVersion"`
 	Kind       string             `json:"kind"`
@@ -41,34 +44,42 @@ type Deployment struct {
 	Digest string `json:"-"`
 }
 
+// DeploymentMetadata identifies the deployment artifact.
 type DeploymentMetadata struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
 }
 
+// DeploymentSpec declares the deployment's MCP dependencies and Agent tree.
 type DeploymentSpec struct {
 	MCPServers []MCPServerDefinition `json:"mcpServers"`
 	Agents     []AgentDefinition     `json:"agents"`
 }
 
+// MCPServerDefinition binds a logical MCP server to environment variables.
 type MCPServerDefinition struct {
 	Name        string `json:"name"`
 	EndpointEnv string `json:"endpointEnv"`
 	TokenEnv    string `json:"tokenEnv,omitempty"`
 }
 
+// AgentMode selects an ADK execution mode for an Agent.
 type AgentMode string
 
+// Supported Agent execution modes.
 const (
 	AgentModeChat       AgentMode = "chat"
 	AgentModeTask       AgentMode = "task"
 	AgentModeSingleTurn AgentMode = "single_turn"
 )
 
+// AgentReference is an outgoing delegation edge in the Agent tree.
 type AgentReference struct {
 	Name string `json:"name"`
 }
 
+// AgentDefinition is one deployed Agent: instruction, optional output contract,
+// tool allowlist, and delegation edges.
 type AgentDefinition struct {
 	Name        string           `json:"name"`
 	Version     string           `json:"version"`
@@ -91,19 +102,33 @@ type AgentDefinition struct {
 	Digest            string               `json:"-"`
 }
 
+// FileReference points at an external artifact relative to the deployment
+// directory.
 type FileReference struct {
 	Path string `json:"path"`
 }
 
+// OutputDefinition declares an Agent's optional structured-output contract and
+// the JSON Pointer selecting its user-facing text.
 type OutputDefinition struct {
 	Schema      FileReference `json:"schema"`
 	TextPointer string        `json:"textPointer"`
 }
 
+// Structured reports whether the Agent declares a structured-output contract.
 func (o OutputDefinition) Structured() bool {
 	return o.Schema.Path != "" || o.TextPointer != ""
 }
 
+// ExposesModelText is the single policy for model-text visibility. A plain-text
+// Agent may stream its model output; a structured Agent never exposes raw model
+// text and only projects its validated user-facing answer. Protocol adapters
+// must consult this function rather than re-deriving the rule.
+func ExposesModelText(definition *AgentDefinition) bool {
+	return definition != nil && !definition.Output.Structured()
+}
+
+// ToolAllowlist is an Agent's server-scoped allowlist of MCP tools.
 type ToolAllowlist struct {
 	Allow map[string][]string `json:"allow"`
 }
@@ -119,11 +144,13 @@ type SkillsBinding struct {
 	Preload string `json:"preload,omitempty"`
 }
 
+// ToolReference names one allowlisted tool on one logical MCP server.
 type ToolReference struct {
 	Server string `json:"server"`
 	Name   string `json:"name"`
 }
 
+// DefinitionRef is the deployment-level identity used by audit and protocols.
 type DefinitionRef struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
@@ -134,6 +161,8 @@ type definitionLoader struct {
 	root string
 }
 
+// LoadAgentDeployment validates an AgentDeployment artifact, resolves its
+// external artifacts, and computes its content digest.
 func LoadAgentDeployment(path string) (*Deployment, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("agent deployment file is required")
@@ -917,6 +946,7 @@ func (d *Deployment) RootName() (string, error) {
 	return roots[0], nil
 }
 
+// Agent returns the AgentDefinition with the given name, if present.
 func (d *Deployment) Agent(name string) (*AgentDefinition, bool) {
 	for index := range d.Spec.Agents {
 		if d.Spec.Agents[index].Name == name {
@@ -934,6 +964,3 @@ func (d *Deployment) DefinitionRef() DefinitionRef {
 		Digest:  d.Digest,
 	}
 }
-
-// Ensure compile-time compatibility with ADK's Agent description surface.
-var _ = llmagent.Config{}

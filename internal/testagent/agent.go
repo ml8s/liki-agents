@@ -11,6 +11,7 @@ import (
 	"github.com/ml8s/liki-agents/internal/agent"
 )
 
+// Deployment loads a generic structured AgentDeployment for adapter tests.
 func Deployment(t *testing.T) *agent.Deployment {
 	t.Helper()
 	t.Setenv("TEST_MCP_ENDPOINT", "in-memory://test")
@@ -54,7 +55,7 @@ func Deployment(t *testing.T) *agent.Deployment {
 	files["agent-deployment.json"] = strings.ReplaceAll(
 		files["agent-deployment.json"], "SKILLS_ROOT_PLACEHOLDER", skillRoot)
 	for name, content := range files {
-		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}

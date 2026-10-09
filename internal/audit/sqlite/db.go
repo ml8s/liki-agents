@@ -1,3 +1,5 @@
+// Package sqlite is the append-only audit persistence adapter. Database
+// technology is confined to this package.
 package sqlite
 
 import (
@@ -20,10 +22,13 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
+// DB owns the SQLite connection used for audit persistence.
 type DB struct {
 	gorm *gorm.DB
 }
 
+// Open opens the audit database, applies migrations, and configures SQLite for
+// append-only evidence storage.
 func Open(path string) (*DB, error) {
 	if path == "" {
 		return nil, fmt.Errorf("sqlite path is required")
@@ -72,10 +77,12 @@ func Open(path string) (*DB, error) {
 	return db, nil
 }
 
+// GORM returns the underlying GORM handle for repository construction.
 func (db *DB) GORM() *gorm.DB {
 	return db.gorm
 }
 
+// Close releases the database connection.
 func (db *DB) Close() error {
 	sqlDB, err := db.gorm.DB()
 	if err != nil {
@@ -84,6 +91,7 @@ func (db *DB) Close() error {
 	return sqlDB.Close()
 }
 
+// CheckHealth reports whether the audit database is reachable.
 func (db *DB) CheckHealth(ctx context.Context) platform.DependencyHealth {
 	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()

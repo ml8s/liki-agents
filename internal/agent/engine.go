@@ -7,11 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
+	"slices"
 
 	"github.com/ml8s/liki-agents/internal/platform"
 	"github.com/ml8s/liki-agents/internal/platform/buildinfo"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"google.golang.org/adk/v2/auth"
 )
 
@@ -20,30 +21,6 @@ import (
 // HTTP health endpoints are deliberately not used.
 func mcpProtocolVersion() string {
 	return mcp.SupportedProtocolVersions()[0]
-}
-
-// CheckHealth verifies every deployment-declared MCP dependency with the MCP
-// protocol's own discovery RPC. This validates the stateless request path,
-// protocol revision, server identity, and required tool capability.
-func (r *Runtime) CheckHealth(ctx context.Context) platform.DependencyHealth {
-	servers, err := resolveMCPServers(r.deploymentMCPServers())
-	if err != nil {
-		return platform.DependencyHealth{Name: "mcp", OK: false, Detail: healthDetail(err)}
-	}
-	if len(servers) == 0 {
-		return platform.DependencyHealth{Name: "mcp", OK: true}
-	}
-
-	failures := make([]string, 0)
-	for _, server := range servers {
-		if err := r.checkMCPDependency(ctx, server); err != nil {
-			failures = append(failures, server.definition.Name+": "+healthDetail(err))
-		}
-	}
-	if len(failures) != 0 {
-		return platform.DependencyHealth{Name: "mcp", OK: false, Detail: strings.Join(failures, "; ")}
-	}
-	return platform.DependencyHealth{Name: "mcp", OK: true}
 }
 
 // MCPHealthChecks returns one readiness checker per declared logical MCP
@@ -117,8 +94,8 @@ func checkMCPDependencyHealth(
 	if result == nil {
 		return errors.New("discovery returned no result")
 	}
-	if result.ProtocolVersion != mcpProtocolVersion() {
-		return fmt.Errorf("negotiated MCP %s, want %s", result.ProtocolVersion, mcpProtocolVersion())
+	if result.ProtocolVersion == "" || !slices.Contains(mcp.SupportedProtocolVersions(), result.ProtocolVersion) {
+		return fmt.Errorf("negotiated unsupported MCP protocol %q", result.ProtocolVersion)
 	}
 	if result.ServerInfo == nil || result.ServerInfo.Name == "" {
 		return errors.New("discovery omitted server identity")
@@ -190,13 +167,15 @@ func healthDetail(err error) string {
 }
 
 func newMCPTransport(config Config, server resolvedMCPServer) *mcp.StreamableClientTransport {
-	httpClient := &http.Client{Timeout: config.MCPTimeout, Transport: http.DefaultTransport}
+	base := otelhttp.NewTransport(http.DefaultTransport)
+	var transport http.RoundTripper = base
 	if server.Token != "" {
-		httpClient.Transport = &auth.Transport{
+		transport = &auth.Transport{
 			Provider: auth.StaticToken(server.Token),
-			Base:     http.DefaultTransport,
+			Base:     base,
 		}
 	}
+	httpClient := &http.Client{Timeout: config.MCPTimeout, Transport: transport}
 	return &mcp.StreamableClientTransport{
 		Endpoint:             server.Endpoint,
 		HTTPClient:           httpClient,
@@ -204,5 +183,3 @@ func newMCPTransport(config Config, server resolvedMCPServer) *mcp.StreamableCli
 		DisableStandaloneSSE: true,
 	}
 }
-
-var _ platform.HealthChecker = (*Runtime)(nil)

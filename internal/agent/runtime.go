@@ -18,6 +18,7 @@ import (
 	"github.com/ml8s/liki-agents/internal/audit"
 	"github.com/ml8s/liki-agents/internal/domain"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -46,6 +47,8 @@ const (
 	maxCompletedRunIDs = 4096
 )
 
+// Runtime owns the single ADK execution graph, its model and MCP
+// dependencies, and the durable audit hooks that protocol adapters drive.
 type Runtime struct {
 	config            Config
 	definition        *Deployment
@@ -113,6 +116,8 @@ func (l *runLifecycle) finish(runID string) {
 	}
 }
 
+// NewRuntime builds the runtime from a validated deployment and its
+// dependencies. It fails closed on any invalid or missing dependency.
 func NewRuntime(config Config) (*Runtime, error) {
 	if config.Logger == nil {
 		config.Logger = slog.Default()
@@ -196,9 +201,12 @@ func NewRuntime(config Config) (*Runtime, error) {
 		// Use ADK's official OpenAI-compatible model. The provider-aware
 		// structured-output adapter handles providers without JSON schema mode.
 		aiModel, err = openaimodel.NewModel(context.Background(), config.Model, &openaimodel.ClientConfig{
-			APIKey:     config.ModelAPIKey,
-			BaseURL:    config.ModelBaseURL,
-			HTTPClient: &http.Client{Timeout: config.ModelTimeout},
+			APIKey:  config.ModelAPIKey,
+			BaseURL: config.ModelBaseURL,
+			HTTPClient: &http.Client{
+				Timeout:   config.ModelTimeout,
+				Transport: otelhttp.NewTransport(http.DefaultTransport),
+			},
 		})
 		if err != nil {
 			return nil, domain.NewError(domain.CodeLLMUnavailable, "create LLM model", err)
@@ -392,18 +400,6 @@ type resolvedMCPServer struct {
 	Token      string
 }
 
-func resolveMCPServers(definitions []MCPServerDefinition) ([]resolvedMCPServer, error) {
-	resolved := make([]resolvedMCPServer, 0, len(definitions))
-	for _, definition := range definitions {
-		server, err := resolveMCPServer(definition)
-		if err != nil {
-			return nil, err
-		}
-		resolved = append(resolved, server)
-	}
-	return resolved, nil
-}
-
 func resolveMCPServer(definition MCPServerDefinition) (resolvedMCPServer, error) {
 	endpoint, ok := os.LookupEnv(definition.EndpointEnv)
 	if !ok || strings.TrimSpace(endpoint) == "" {
@@ -477,13 +473,13 @@ func (r *Runtime) BeginAuditRun(ctx context.Context, sessionID string, scope Aud
 	if scope.RunID == "" || scope.ThreadID == "" || scope.UserID == "" {
 		return domain.NewError(domain.CodeAuditScopeRequired, "run, thread, and user identifiers are required", domain.ErrInvalidInput)
 	}
-	if !validProtocolIdentifier(scope.RunID) {
+	if !ValidIdentifier(scope.RunID) {
 		return domain.NewError(domain.CodeRunIDInvalid, "run id must contain at most 128 printable bytes", domain.ErrInvalidInput)
 	}
-	if !validProtocolIdentifier(scope.ThreadID) {
+	if !ValidIdentifier(scope.ThreadID) {
 		return domain.NewError(domain.CodeThreadIDInvalid, "thread id must contain at most 128 printable bytes", domain.ErrInvalidInput)
 	}
-	if !validProtocolIdentifier(scope.UserID) {
+	if !ValidIdentifier(scope.UserID) {
 		return domain.NewError(domain.CodeUserIDInvalid, "user id must contain at most 128 printable bytes", domain.ErrInvalidInput)
 	}
 	if err := r.ensureDurableRunID(ctx, scope.RunID); err != nil {
@@ -510,6 +506,8 @@ func (r *Runtime) BeginAuditRun(ctx context.Context, sessionID string, scope Aud
 		graph:             r.config.GraphVersion,
 		contract:          r.config.ContractVersion,
 		instructionDigest: r.entrypoint.InstructionDigest,
+		traceID:           traceIDFromContext(ctx),
+		spanID:            spanIDFromContext(ctx),
 		definitionName:    r.definition.Metadata.Name,
 		definitionVersion: r.definition.Metadata.Version,
 		definitionDigest:  r.definition.Digest,
@@ -522,8 +520,7 @@ func (r *Runtime) BeginAuditRun(ctx context.Context, sessionID string, scope Aud
 		r.runs.finish(scope.RunID)
 		return domain.NewError(domain.CodeAuditSessionActive, "an audit run is already active for this session", domain.ErrInvalidInput)
 	}
-	event := r.externalRunEvent(ctx, ledgerScope, audit.EventRunStarted, audit.StatusRunning, nil)
-	event.OccurredAt = r.config.Now()
+	event := r.runEvent(ctx, ledgerScope, audit.EventRunStarted, audit.StatusRunning, nil)
 	if err := r.recordAuditWithRetry(ctx, &event); err != nil {
 		r.runs.finish(scope.RunID)
 		_, _ = r.llm.end(sessionID, err)
@@ -536,52 +533,42 @@ func (r *Runtime) BeginAuditRun(ctx context.Context, sessionID string, scope Aud
 }
 
 // EndAuditRun completes an externally driven audit lifecycle exactly once.
+//
+// The run scope is released only after the terminal run event is durably
+// appended. A transient append failure therefore returns without releasing the
+// scope or the concurrency slot, so the executor's cleanup callback retries the
+// terminal append rather than stranding an orphaned started event. Startup
+// recovery remains the last resort if the process exits before a retry succeeds.
 func (r *Runtime) EndAuditRun(ctx context.Context, sessionID string, runErr error) error {
 	ctx = context.WithoutCancel(ctx)
 	if sessionID == "" {
 		return nil
 	}
 	scope, existed := r.llm.scope(sessionID)
-	_, ledgerErr := r.llm.end(sessionID, runtimeError(runErr))
+	if !existed {
+		return nil
+	}
+
+	// Close in-flight model calls, then stranded delegations and tools, while
+	// keeping the run scope for a retryable terminal append.
 	var terminalErr error
-	if ledgerErr != nil {
+	if ledgerErr := r.llm.closeActive(scope, runtimeError(runErr)); ledgerErr != nil {
 		if reconcileErr := r.llm.reconcile(scope, ledgerErr); reconcileErr == nil {
 			ledgerErr = nil
 		} else {
 			ledgerErr = reconcileErr
 		}
-	}
-	if ledgerErr != nil {
-		terminalErr = ledgerErr
-	}
-	if existed {
-		if auditErr := r.delegationAuditor.FailPending(ctx, scope, runErr); auditErr != nil {
-			if terminalErr == nil {
-				terminalErr = auditErr
-			}
-		}
-		if auditErr := r.toolAuditor.FailPending(ctx, scope); auditErr != nil {
-			if terminalErr == nil {
-				terminalErr = auditErr
-			}
+		if ledgerErr != nil {
+			terminalErr = ledgerErr
 		}
 	}
-	if !existed {
-		return nil
+	if auditErr := r.delegationAuditor.FailPending(ctx, scope, runErr); auditErr != nil && terminalErr == nil {
+		terminalErr = auditErr
 	}
-	defer func() {
-		if scope.releaseRun != nil {
-			scope.releaseRun()
-		}
-		r.runs.finish(string(scope.runID))
-	}()
-	if deleteErr := r.sessions.Delete(ctx, &session.DeleteRequest{
-		AppName:   r.config.AppName,
-		UserID:    scope.userID,
-		SessionID: sessionID,
-	}); deleteErr != nil && terminalErr == nil {
-		terminalErr = domain.NewError(domain.CodeRuntimeSessionCleanupFailed, "delete external ADK session", deleteErr)
+	if auditErr := r.toolAuditor.FailPending(ctx, scope); auditErr != nil && terminalErr == nil {
+		terminalErr = auditErr
 	}
+
 	cause := runErr
 	if cause == nil {
 		cause = terminalErr
@@ -592,55 +579,64 @@ func (r *Runtime) EndAuditRun(ctx context.Context, sessionID string, runErr erro
 		eventType = audit.EventRunFailed
 		status = audit.StatusFailed
 	}
-	event := r.externalRunEvent(ctx, scope, eventType, status, cause)
-	event.OccurredAt = r.config.Now()
-	if recordErr := r.recordAuditWithRetry(ctx, &event); recordErr != nil && terminalErr == nil {
-		terminalErr = recordErr
+	event := r.runEvent(ctx, scope, eventType, status, cause)
+	if recordErr := r.recordAuditWithRetry(ctx, &event); recordErr != nil {
+		return recordErr
 	}
+
+	// Terminal evidence is durable: release process state exactly once.
+	if deleteErr := r.sessions.Delete(ctx, &session.DeleteRequest{
+		AppName:   r.config.AppName,
+		UserID:    scope.userID,
+		SessionID: sessionID,
+	}); deleteErr != nil && terminalErr == nil {
+		terminalErr = domain.NewError(domain.CodeRuntimeSessionCleanupFailed, "delete external ADK session", deleteErr)
+	}
+	r.llm.forget(sessionID)
+	if scope.releaseRun != nil {
+		scope.releaseRun()
+	}
+	r.runs.finish(string(scope.runID))
 	return terminalErr
 }
 
-func (r *Runtime) externalRunEvent(
+// runEvent is the single constructor for run-lifecycle audit events, shared by
+// the protocol-driven Run path and the externally driven BeginAuditRun /
+// EndAuditRun path.
+func (r *Runtime) runEvent(
 	ctx context.Context,
 	scope *llmRunScope,
 	eventType audit.EventType,
 	status audit.Status,
 	cause error,
 ) audit.Event {
-	event := audit.Event{
-		ID:                    string(scope.runID) + ":" + string(eventType),
-		SchemaVersion:         audit.SchemaV1,
-		Type:                  eventType,
-		RootRunID:             scope.runID,
-		RunID:                 scope.runID,
-		ThreadID:              scope.threadID,
-		UserID:                scope.userID,
-		Protocol:              scope.protocol,
-		AgentName:             r.entrypoint.Name,
-		AgentVersion:          r.entrypoint.Version,
-		AgentDefinitionDigest: r.entrypoint.Digest,
-		DefinitionName:        r.definition.Metadata.Name,
-		DefinitionVersion:     r.definition.Metadata.Version,
-		DefinitionDigest:      r.definition.Digest,
-		Model:                 r.config.Model,
-		Provider:              r.config.Provider,
-		Status:                status,
-		DurationMS:            r.config.Now().Sub(scope.startedAt).Milliseconds(),
-		TraceID:               traceIDFromContext(ctx),
-		SpanID:                spanIDFromContext(ctx),
-	}
+	event := scopedEvent(scope)
+	event.ID = string(scope.runID) + ":" + string(eventType)
+	event.Type = eventType
+	event.OccurredAt = r.config.Now()
+	event.AgentName = r.entrypoint.Name
+	event.AgentVersion = r.entrypoint.Version
+	event.AgentDefinitionDigest = r.entrypoint.Digest
+	event.Model = r.config.Model
+	event.Provider = r.config.Provider
+	event.Status = status
+	event.DurationMS = r.config.Now().Sub(scope.startedAt).Milliseconds()
+	event.TraceID = traceIDFromContext(ctx)
+	event.SpanID = spanIDFromContext(ctx)
 	if cause != nil {
-		runtimeErr := runtimeError(cause)
-		var domainErr *domain.Error
-		if errors.As(runtimeErr, &domainErr) {
-			event.ErrorCode = domainErr.Code
-			event.ErrorMessage = domainErr.Message
-		} else {
-			event.ErrorCode = domain.CodeRuntimeFailed
-			event.ErrorMessage = runtimeErr.Error()
-		}
+		event.ErrorCode, event.ErrorMessage = errorFields(cause)
 	}
 	return event
+}
+
+// errorFields maps an arbitrary error to stable audit error fields.
+func errorFields(cause error) (code, message string) {
+	runtimeErr := runtimeError(cause)
+	var domainErr *domain.Error
+	if errors.As(runtimeErr, &domainErr) {
+		return domainErr.Code, domainErr.Message
+	}
+	return domain.CodeRuntimeFailed, runtimeErr.Error()
 }
 
 // Run executes the shared ADK runtime and exposes native ADK events to a
@@ -663,11 +659,11 @@ func (r *Runtime) Run(
 		return RunResult{}, domain.NewError(domain.CodeUserIDRequired, "user id is required", domain.ErrInvalidInput)
 	case strings.TrimSpace(request.UserMessage) == "":
 		return RunResult{}, domain.NewError(domain.CodeUserMessageRequired, "user message is required", domain.ErrInvalidInput)
-	case !validProtocolIdentifier(request.RunID):
+	case !ValidIdentifier(request.RunID):
 		return RunResult{}, domain.NewError(domain.CodeRunIDInvalid, "run id must contain at most 128 printable bytes", domain.ErrInvalidInput)
-	case !validProtocolIdentifier(request.ThreadID):
+	case !ValidIdentifier(request.ThreadID):
 		return RunResult{}, domain.NewError(domain.CodeThreadIDInvalid, "thread id must contain at most 128 printable bytes", domain.ErrInvalidInput)
-	case !validProtocolIdentifier(request.UserID):
+	case !ValidIdentifier(request.UserID):
 		return RunResult{}, domain.NewError(domain.CodeUserIDInvalid, "user id must contain at most 128 printable bytes", domain.ErrInvalidInput)
 	case len(request.History) > MaxHistoryMessages:
 		return RunResult{}, domain.NewError(domain.CodeHistoryInvalid, fmt.Sprintf("conversation history exceeds %d messages", MaxHistoryMessages), domain.ErrInvalidInput)
@@ -722,6 +718,8 @@ func (r *Runtime) Run(
 		graph:             r.config.GraphVersion,
 		contract:          r.config.ContractVersion,
 		instructionDigest: r.entrypoint.InstructionDigest,
+		traceID:           traceIDFromContext(ctx),
+		spanID:            spanIDFromContext(ctx),
 		definitionName:    r.definition.Metadata.Name,
 		definitionVersion: r.definition.Metadata.Version,
 		definitionDigest:  r.definition.Digest,
@@ -732,7 +730,7 @@ func (r *Runtime) Run(
 		runErr = domain.NewError(domain.CodeAuditSessionActive, "an audit run is already active for this session", domain.ErrInvalidInput)
 		return RunResult{}, runErr
 	}
-	if auditErr := r.recordRunAudit(ctx, request, audit.EventRunStarted, audit.StatusRunning, startedAt, nil); auditErr != nil {
+	if auditErr := r.recordRunAudit(ctx, scope, audit.EventRunStarted, audit.StatusRunning, nil); auditErr != nil {
 		runErr = auditErr
 		auditScope, _ := r.llm.scope(sessionID)
 		_, _ = r.llm.end(sessionID, runErr)
@@ -746,12 +744,13 @@ func (r *Runtime) Run(
 		return RunResult{}, runErr
 	}
 	defer func() {
-		// Capture the run scope before the LLM ledger removes it so pending
-		// delegation/tool auditors can still emit terminal evidence.
-		auditScope, _ := r.llm.scope(sessionID)
-		_, ledgerErr := r.llm.end(sessionID, runErr)
+		auditCtx := context.WithoutCancel(ctx)
+		// Close in-flight model calls, then stranded delegations and tools,
+		// while keeping the run scope so the terminal event is appended before
+		// any process state is released (mirrors EndAuditRun's ordering).
+		ledgerErr := r.llm.closeActive(scope, runtimeError(runErr))
 		if ledgerErr != nil {
-			if reconcileErr := r.llm.reconcile(auditScope, ledgerErr); reconcileErr == nil {
+			if reconcileErr := r.llm.reconcile(scope, ledgerErr); reconcileErr == nil {
 				ledgerErr = nil
 			} else {
 				ledgerErr = reconcileErr
@@ -760,19 +759,11 @@ func (r *Runtime) Run(
 		if ledgerErr != nil && runErr == nil {
 			runErr = ledgerErr
 		}
-		if delegationAuditErr := r.delegationAuditor.FailPending(context.WithoutCancel(ctx), auditScope, runErr); delegationAuditErr != nil && runErr == nil {
+		if delegationAuditErr := r.delegationAuditor.FailPending(auditCtx, scope, runErr); delegationAuditErr != nil && runErr == nil {
 			runErr = delegationAuditErr
 		}
-		if toolAuditErr := r.toolAuditor.FailPending(context.WithoutCancel(ctx), auditScope); toolAuditErr != nil && runErr == nil {
+		if toolAuditErr := r.toolAuditor.FailPending(auditCtx, scope); toolAuditErr != nil && runErr == nil {
 			runErr = toolAuditErr
-		}
-		auditCtx := context.WithoutCancel(ctx)
-		if deleteErr := r.sessions.Delete(auditCtx, &session.DeleteRequest{
-			AppName:   r.config.AppName,
-			UserID:    request.UserID,
-			SessionID: sessionID,
-		}); deleteErr != nil && runErr == nil {
-			runErr = domain.NewError(domain.CodeRuntimeSessionCleanupFailed, "delete run-scoped ADK session", deleteErr)
 		}
 		eventType := audit.EventRunCompleted
 		status := audit.StatusSucceeded
@@ -782,8 +773,17 @@ func (r *Runtime) Run(
 			status = audit.StatusFailed
 			auditFailure = runErr
 		}
-		if auditErr := r.recordRunAudit(auditCtx, request, eventType, status, startedAt, auditFailure); auditErr != nil && runErr == nil {
+		if auditErr := r.recordRunAudit(auditCtx, scope, eventType, status, auditFailure); auditErr != nil && runErr == nil {
 			runErr = auditErr
+		}
+		// Terminal evidence has been attempted; release process state now.
+		r.llm.forget(sessionID)
+		if deleteErr := r.sessions.Delete(auditCtx, &session.DeleteRequest{
+			AppName:   r.config.AppName,
+			UserID:    request.UserID,
+			SessionID: sessionID,
+		}); deleteErr != nil && runErr == nil {
+			runErr = domain.NewError(domain.CodeRuntimeSessionCleanupFailed, "delete run-scoped ADK session", deleteErr)
 		}
 		if runErr != nil {
 			runtimeErr := runtimeError(runErr)
@@ -812,7 +812,7 @@ func (r *Runtime) Run(
 			runSpan.SetStatus(codes.Error, runtimeError(err).Error())
 			r.config.Logger.WarnContext(ctx, "agent_run_failed",
 				append(traceLogFields(ctx),
-					"run_id", request.RunID, "error", runtimeError(err).Error(), "cause", err.Error(),
+					"run_id", request.RunID, "error", runtimeError(err).Error(),
 				)...)
 			runErr = runtimeError(err)
 			return RunResult{}, runErr
@@ -876,46 +876,12 @@ func (r *Runtime) ensureDurableRunID(ctx context.Context, runID string) error {
 
 func (r *Runtime) recordRunAudit(
 	ctx context.Context,
-	request RunRequest,
+	scope *llmRunScope,
 	eventType audit.EventType,
 	status audit.Status,
-	startedAt time.Time,
 	cause error,
 ) error {
-	event := audit.Event{
-		TraceID:               traceIDFromContext(ctx),
-		SpanID:                spanIDFromContext(ctx),
-		DefinitionName:        r.definition.Metadata.Name,
-		DefinitionVersion:     r.definition.Metadata.Version,
-		DefinitionDigest:      r.definition.Digest,
-		ID:                    request.RunID + ":" + string(eventType),
-		SchemaVersion:         audit.SchemaV1,
-		Type:                  eventType,
-		OccurredAt:            r.config.Now(),
-		RootRunID:             domain.ID(request.RunID),
-		RunID:                 domain.ID(request.RunID),
-		ThreadID:              domain.ID(request.ThreadID),
-		UserID:                request.UserID,
-		Protocol:              request.Protocol,
-		AgentName:             r.entrypoint.Name,
-		AgentVersion:          r.entrypoint.Version,
-		AgentDefinitionDigest: r.entrypoint.Digest,
-		Model:                 r.config.Model,
-		Provider:              r.config.Provider,
-		Status:                status,
-		DurationMS:            r.config.Now().Sub(startedAt).Milliseconds(),
-	}
-	if cause != nil {
-		runtimeErr := runtimeError(cause)
-		var domainErr *domain.Error
-		if errors.As(runtimeErr, &domainErr) {
-			event.ErrorCode = domainErr.Code
-			event.ErrorMessage = domainErr.Message
-		} else {
-			event.ErrorCode = domain.CodeRuntimeFailed
-			event.ErrorMessage = runtimeErr.Error()
-		}
-	}
+	event := r.runEvent(ctx, scope, eventType, status, cause)
 	if err := event.Validate(); err != nil {
 		return err
 	}
@@ -989,10 +955,6 @@ func traceLogFields(ctx context.Context) []any {
 		return nil
 	}
 	return []any{"trace_id", spanContext.TraceID().String(), "span_id", spanContext.SpanID().String()}
-}
-
-func validProtocolIdentifier(value string) bool {
-	return ValidIdentifier(value)
 }
 
 func traceIDFromContext(ctx context.Context) string {

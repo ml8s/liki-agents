@@ -57,10 +57,10 @@ func TestFourAgentArtifactIsLoadable(t *testing.T) {
 			]
 		}
 	}`
-	if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(manifest), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(manifest), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

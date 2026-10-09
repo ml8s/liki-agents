@@ -19,6 +19,8 @@ type runState struct {
 	tools        toolNameTracker
 }
 
+// OutputResult is the validated final outcome of a run: the generic structured
+// JSON when declared, plus the user-facing text.
 type OutputResult struct {
 	JSON json.RawMessage
 	Text string
@@ -127,21 +129,6 @@ func ParseStructuredOutput(value any, definition *AgentDefinition) (OutputResult
 		return OutputResult{}, domain.NewError(domain.CodeStructuredOutputEmpty, "structured agent output has no answer text", nil)
 	}
 	return OutputResult{JSON: canonicalJSON(document), Text: text}, nil
-}
-
-// OutputText extracts the Agent-declared user-facing text from validated
-// structured output. Protocol adapters use this so they cannot hard-code a
-// domain schema shape.
-func OutputText(value any, pointer string) (string, error) {
-	if encoded, ok := value.(string); ok {
-		var decoded any
-		var err error
-		if decoded, err = decodeJSONDocument([]byte(encoded)); err != nil {
-			return "", fmt.Errorf("decode structured output: %w", err)
-		}
-		value = decoded
-	}
-	return jsonStringAtPointer(value, pointer)
 }
 
 func jsonStringAtPointer(document any, pointer string) (string, error) {

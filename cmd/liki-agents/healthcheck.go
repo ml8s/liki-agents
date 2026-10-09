@@ -1,3 +1,5 @@
+// Command liki-agents runs the generic multi-agent runtime and its operational
+// subcommands.
 package main
 
 import (

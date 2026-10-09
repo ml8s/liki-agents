@@ -120,7 +120,9 @@ on AG-UI as a tool event and is audited through Agent delegation lifecycle
 events rather than MCP tool provenance.
 
 Raw structured model output is not emitted to protocol observers. Partial
-events are suppressed. A structured Agent returns validated generic JSON plus
+events are suppressed. Model-text visibility is defined once
+(`agent.ExposesModelText`) and shared by both protocol adapters. A structured
+Agent returns validated generic JSON plus
 the user-facing text selected by its configured JSON Pointer; a plain-text
 Agent returns final model text directly. In a delegated plain-text tree, the
 last terminal expert model response is the root user-facing answer. Structured
@@ -135,7 +137,10 @@ protocol must not replace a reviewed standard.
 
 A2A uses the official A2A Go SDK JSON-RPC binding and ADK A2A executor.
 The runtime uses the executor's standard ContextID-to-ADK-session mapping. No
-private A2A extension, RPC method, or state machine is advertised.
+private A2A extension, RPC method, or state machine is advertised. Model-text
+visibility is resolved per event author against the deployment by both adapters
+(via `agent.ExposesModelText`), so a structured expert delegated under a plain
+entrypoint never leaks raw model JSON on either protocol.
 
 MCP endpoint bindings are deployment-owned complete URLs. A gateway may expose
 service prefixes such as `/engine` and `/counsel`; the MCP service owns its
@@ -200,7 +205,13 @@ raw model output, or tool payloads.
 
 Audit events are append-only SQLite records. They contain execution metadata,
 protocol, trace correlation, agent and deployment digests, versions, status,
-duration, and error codes—not conversation or domain payloads.
+duration, and error codes—not conversation or domain payloads. Both execution
+paths append the terminal run event before releasing process state (session,
+concurrency slot); the A2A path additionally remains retryable by the executor's
+cleanup callback when the terminal append fails, while the AG-UI (Run) path
+relies on startup recovery for that residual failure. Reconciled terminal facts
+(interrupted runs, model calls, tools, delegations) carry the same trace and
+definition provenance as their started facts.
 
 Before accepting traffic, the single-process runtime transactionally finds
 started run, LLM, tool, and delegation events without terminal evidence and

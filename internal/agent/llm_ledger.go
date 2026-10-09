@@ -15,14 +15,13 @@ import (
 )
 
 type llmLedger struct {
-	mu         sync.Mutex
-	recorder   audit.Recorder
-	metrics    Metrics
-	now        func() time.Time
-	provider   string
-	deployment *Deployment
-	agents     map[string]*AgentDefinition
-	scopes     map[string]*llmRunScope
+	mu       sync.Mutex
+	recorder audit.Recorder
+	metrics  Metrics
+	now      func() time.Time
+	provider string
+	agents   map[string]*AgentDefinition
+	scopes   map[string]*llmRunScope
 }
 
 type llmRunScope struct {
@@ -37,6 +36,8 @@ type llmRunScope struct {
 	graph             string
 	contract          string
 	instructionDigest string
+	traceID           string
+	spanID            string
 	releaseRun        func()
 	definitionName    string
 	definitionVersion string
@@ -55,16 +56,15 @@ type llmCallRuntime struct {
 
 func newLLMLedger(recorder audit.Recorder, metrics Metrics, provider string, deployment *Deployment, now func() time.Time) *llmLedger {
 	if now == nil {
-		now = time.Now
+		now = func() time.Time { return time.Now().UTC() }
 	}
 	ledger := &llmLedger{
-		recorder:   recorder,
-		metrics:    metrics,
-		provider:   provider,
-		now:        now,
-		deployment: deployment,
-		agents:     make(map[string]*AgentDefinition, len(deployment.Spec.Agents)),
-		scopes:     make(map[string]*llmRunScope),
+		recorder: recorder,
+		metrics:  metrics,
+		provider: provider,
+		now:      now,
+		agents:   make(map[string]*AgentDefinition, len(deployment.Spec.Agents)),
+		scopes:   make(map[string]*llmRunScope),
 	}
 	for index := range deployment.Spec.Agents {
 		ledger.agents[deployment.Spec.Agents[index].Name] = &deployment.Spec.Agents[index]
@@ -83,23 +83,34 @@ func (l *llmLedger) begin(sessionID string, scope *llmRunScope) bool {
 	return true
 }
 
-func (l *llmLedger) end(sessionID string, runErr error) (bool, error) {
+// closeActive fails every in-flight model call for the run and leaves the run
+// scope in place, so a caller can append terminal evidence before releasing it.
+// A nil run error represents an interruption.
+func (l *llmLedger) closeActive(scope *llmRunScope, runErr error) error {
+	if scope == nil {
+		return nil
+	}
+	failure := runErr
+	if failure == nil {
+		failure = domain.NewError(domain.CodeRuntimeInterrupted, "runtime stopped before the LLM call finished", nil)
+	}
+	return l.failActive(scope, failure, l.now())
+}
+
+func (l *llmLedger) forget(sessionID string) {
 	l.mu.Lock()
-	scope, exists := l.scopes[sessionID]
-	if exists {
-		delete(l.scopes, sessionID)
-	}
+	delete(l.scopes, sessionID)
 	l.mu.Unlock()
-	if exists {
-		failure := runErr
-		if failure == nil {
-			failure = domain.NewError(domain.CodeRuntimeInterrupted, "runtime stopped before the LLM call finished", nil)
-		}
-		if err := l.failActive(scope, failure, l.now()); err != nil {
-			return exists, err
-		}
+}
+
+func (l *llmLedger) end(sessionID string, runErr error) (bool, error) {
+	scope, exists := l.scope(sessionID)
+	if !exists {
+		return false, nil
 	}
-	return exists, nil
+	err := l.closeActive(scope, runErr)
+	l.forget(sessionID)
+	return true, err
 }
 
 func (l *llmLedger) scope(sessionID string) (*llmRunScope, bool) {
@@ -153,7 +164,7 @@ func (l *llmLedger) beforeModel(ctx agent.Context, request *model.LLMRequest) (*
 	if err := call.Validate(); err != nil {
 		return nil, err
 	}
-	if err := l.recordCall(ctx, scope.protocol, call, audit.EventLLMCallStarted, audit.StatusRunning); err != nil {
+	if err := l.recordCall(ctx, scope, call, audit.EventLLMCallStarted, audit.StatusRunning); err != nil {
 		return nil, err
 	}
 	runtime := llmCallRuntime{
@@ -227,7 +238,7 @@ func (l *llmLedger) afterModel(ctx agent.Context, response *model.LLMResponse, r
 		terminalEvent = audit.EventLLMCallFailed
 		terminalStatus = audit.StatusFailed
 	}
-	if auditErr := l.recordCall(context.WithoutCancel(ctx), scope.protocol, call, terminalEvent, terminalStatus); auditErr != nil {
+	if auditErr := l.recordCall(context.WithoutCancel(ctx), scope, call, terminalEvent, terminalStatus); auditErr != nil {
 		return response, auditErr
 	}
 	scope.mu.Lock()
@@ -251,9 +262,9 @@ func (l *llmLedger) onModelError(ctx agent.Context, request *model.LLMRequest, r
 	if !ok || requestErr == nil {
 		return nil, requestErr
 	}
-	modelName := request.Model
-	if modelName == "" {
-		modelName = scope.model
+	modelName := scope.model
+	if request != nil && request.Model != "" {
+		modelName = request.Model
 	}
 	callbackKey, err := llmCallbackKey(ctx)
 	if err != nil {
@@ -261,7 +272,6 @@ func (l *llmLedger) onModelError(ctx agent.Context, request *model.LLMRequest, r
 	}
 	scope.mu.Lock()
 	runtime, exists := scope.activeCalls[callbackKey]
-	scope.mu.Unlock()
 	if !exists {
 		scope.nextCall++
 		callSeq := scope.nextCall
@@ -270,6 +280,16 @@ func (l *llmLedger) onModelError(ctx agent.Context, request *model.LLMRequest, r
 			model:     modelName,
 			agentName: ctx.AgentName(),
 			startedAt: l.now(),
+		}
+	}
+	scope.mu.Unlock()
+	if !exists {
+		// ADK invoked the model-error callback without a matching BeforeModel
+		// callback, so no started fact exists yet. The audit contract requires
+		// started and terminal evidence for every model call; synthesize the
+		// missing started fact before recording the failure.
+		if err := l.recordCallStarted(ctx, scope, runtime); err != nil {
+			return nil, err
 		}
 	}
 	finishedAt := l.now()
@@ -298,7 +318,7 @@ func (l *llmLedger) onModelError(ctx agent.Context, request *model.LLMRequest, r
 	if err := call.Validate(); err != nil {
 		return nil, err
 	}
-	if auditErr := l.recordCall(context.WithoutCancel(ctx), scope.protocol, call, audit.EventLLMCallFailed, audit.StatusFailed); auditErr != nil {
+	if auditErr := l.recordCall(context.WithoutCancel(ctx), scope, call, audit.EventLLMCallFailed, audit.StatusFailed); auditErr != nil {
 		return nil, auditErr
 	}
 	if exists {
@@ -333,7 +353,7 @@ func (l *llmLedger) failActive(scope *llmRunScope, err error, finishedAt time.Ti
 		call.DurationMS = finishedAt.Sub(call.StartedAt).Milliseconds()
 		call.Fail(err, finishedAt)
 		l.applyAgent(call, call.AgentName)
-		recordErr := l.recordCall(context.Background(), scope.protocol, call, audit.EventLLMCallFailed, audit.StatusFailed)
+		recordErr := l.recordCall(context.Background(), scope, call, audit.EventLLMCallFailed, audit.StatusFailed)
 		if recordErr == nil {
 			delete(scope.activeCalls, callbackKey)
 		} else if firstErr == nil {
@@ -361,42 +381,68 @@ func (l *llmLedger) applyAgent(call *domain.LLMCall, name string) {
 	call.PromptVersion = definition.InstructionDigest
 }
 
-func (l *llmLedger) recordCall(ctx context.Context, protocol string, call *domain.LLMCall, eventType audit.EventType, status audit.Status) error {
+// recordCallStarted appends the started fact for a model call that ADK reported
+// without a matching BeforeModel callback, preserving the audit contract that
+// every model call has started and terminal evidence.
+func (l *llmLedger) recordCallStarted(ctx agent.Context, scope *llmRunScope, runtime llmCallRuntime) error {
+	call := &domain.LLMCall{
+		ID:                runtime.id,
+		RunID:             scope.runID,
+		ThreadID:          scope.threadID,
+		UserID:            scope.userID,
+		AgentName:         runtime.agentName,
+		Model:             runtime.model,
+		Provider:          l.provider,
+		Status:            domain.LLMCallRunning,
+		GraphVersion:      scope.graph,
+		ContractVersion:   scope.contract,
+		PromptVersion:     scope.instructionDigest,
+		DefinitionName:    scope.definitionName,
+		DefinitionVersion: scope.definitionVersion,
+		DefinitionDigest:  scope.definitionDigest,
+		StartedAt:         runtime.startedAt,
+	}
+	call.Normalize()
+	l.applyAgent(call, call.AgentName)
+	if err := call.Validate(); err != nil {
+		return err
+	}
+	return l.recordCall(context.WithoutCancel(ctx), scope, call, audit.EventLLMCallStarted, audit.StatusRunning)
+}
+
+func (l *llmLedger) recordCall(ctx context.Context, scope *llmRunScope, call *domain.LLMCall, eventType audit.EventType, status audit.Status) error {
 	if l.recorder == nil {
 		return domain.NewError(domain.CodeAuditRecorderMissing, "audit recorder is required", nil)
 	}
-	event := audit.Event{
-		ID:                    call.ID + ":" + string(eventType),
-		SchemaVersion:         audit.SchemaV1,
-		Type:                  eventType,
-		RootRunID:             call.RunID,
-		RunID:                 call.RunID,
-		ThreadID:              call.ThreadID,
-		UserID:                call.UserID,
-		AgentName:             call.AgentName,
-		AgentVersion:          call.AgentVersion,
-		AgentDefinitionDigest: call.AgentDefinitionDigest,
-		DefinitionName:        call.DefinitionName,
-		DefinitionVersion:     call.DefinitionVersion,
-		DefinitionDigest:      call.DefinitionDigest,
-		Model:                 call.Model,
-		Provider:              call.Provider,
-		Protocol:              protocol,
-		Status:                status,
-		DurationMS:            call.DurationMS,
-		ErrorCode:             call.ErrorCode,
-		ErrorMessage:          call.ErrorMessage,
-		TraceID:               traceIDFromContext(ctx),
-		SpanID:                spanIDFromContext(ctx),
-		Payload: map[string]any{
-			"graph_version":     call.GraphVersion,
-			"contract_version":  call.ContractVersion,
-			"prompt_version":    call.PromptVersion,
-			"prompt_tokens":     call.PromptTokens,
-			"completion_tokens": call.CompletionTokens,
-			"thought_tokens":    call.ThoughtTokens,
-			"total_tokens":      call.TotalTokens,
-		},
+	event := scopedEvent(scope)
+	event.ID = call.ID + ":" + string(eventType)
+	event.Type = eventType
+	event.AgentName = call.AgentName
+	event.AgentVersion = call.AgentVersion
+	event.AgentDefinitionDigest = call.AgentDefinitionDigest
+	event.Model = call.Model
+	event.Provider = call.Provider
+	event.Status = status
+	event.DurationMS = call.DurationMS
+	event.ErrorCode = call.ErrorCode
+	event.ErrorMessage = call.ErrorMessage
+	event.TraceID = traceIDFromContext(ctx)
+	event.SpanID = spanIDFromContext(ctx)
+	if event.TraceID == "" && scope.traceID != "" {
+		// Reconciliation paths may lack a live span context (for example
+		// failActive). Fall back to the run-scoped trace so reconciled
+		// terminal events stay correlatable (DOMAIN invariant 9).
+		event.TraceID = scope.traceID
+		event.SpanID = scope.spanID
+	}
+	event.Payload = map[string]any{
+		"graph_version":     call.GraphVersion,
+		"contract_version":  call.ContractVersion,
+		"prompt_version":    call.PromptVersion,
+		"prompt_tokens":     call.PromptTokens,
+		"completion_tokens": call.CompletionTokens,
+		"thought_tokens":    call.ThoughtTokens,
+		"total_tokens":      call.TotalTokens,
 	}
 	if eventType == audit.EventLLMCallStarted {
 		event.OccurredAt = call.StartedAt

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/ml8s/liki-agents/internal/platform"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -17,14 +18,12 @@ type healthProbe struct {
 }
 
 func TestCheckHealthUsesCurrentMCPDiscovery(t *testing.T) {
-	t.Parallel()
-
 	probe, runtime := newHealthTestRuntime(t, &mcp.ServerOptions{}, "test_tool")
-	health := runtime.CheckHealth(context.Background())
+	health := checkMCPHealth(t, runtime)
 	if !health.OK {
 		t.Fatalf("CheckHealth() = %+v, want ready", health)
 	}
-	if health.Name != "mcp" {
+	if health.Name != "mcp/test" {
 		t.Fatalf("dependency name = %q", health.Name)
 	}
 	if !probe.sawDiscover {
@@ -39,8 +38,6 @@ func TestCheckHealthUsesCurrentMCPDiscovery(t *testing.T) {
 }
 
 func TestMCPHealthChecksExposeEachLogicalServer(t *testing.T) {
-	t.Parallel()
-
 	_, runtime := newHealthTestRuntime(t, &mcp.ServerOptions{}, "test_tool")
 	checkers := runtime.MCPHealthChecks()
 	if len(checkers) != 1 {
@@ -51,9 +48,9 @@ func TestMCPHealthChecksExposeEachLogicalServer(t *testing.T) {
 	}
 }
 
-func TestCheckHealthRejectsLegacyProtocolFallback(t *testing.T) {
-	t.Parallel()
-
+func TestCheckHealthAcceptsNegotiatedSupportedProtocol(t *testing.T) {
+	// A compliant server may negotiate an older protocol version it supports;
+	// readiness must accept it instead of demanding the newest revision.
 	options := &mcp.ServerOptions{
 		SupportedProtocolVersions: []string{"2025-11-25"},
 		Capabilities: &mcp.ServerCapabilities{
@@ -61,18 +58,16 @@ func TestCheckHealthRejectsLegacyProtocolFallback(t *testing.T) {
 		},
 	}
 	_, runtime := newHealthTestRuntime(t, options, "test_tool")
-	health := runtime.CheckHealth(context.Background())
-	if health.OK {
-		t.Fatal("CheckHealth() accepted a legacy MCP negotiation")
+	health := checkMCPHealth(t, runtime)
+	if !health.OK {
+		t.Fatalf("CheckHealth() rejected a supported negotiated protocol: %+v", health)
 	}
 }
 
 func TestCheckHealthRejectsMissingToolCapability(t *testing.T) {
-	t.Parallel()
-
 	options := &mcp.ServerOptions{Capabilities: &mcp.ServerCapabilities{}}
 	_, runtime := newHealthTestRuntime(t, options, "")
-	health := runtime.CheckHealth(context.Background())
+	health := checkMCPHealth(t, runtime)
 	if health.OK {
 		t.Fatal("CheckHealth() accepted a server without tool capability")
 	}
@@ -80,6 +75,7 @@ func TestCheckHealthRejectsMissingToolCapability(t *testing.T) {
 
 func newHealthTestRuntime(t *testing.T, options *mcp.ServerOptions, toolName string) (*healthProbe, *Runtime) {
 	t.Helper()
+	t.Setenv("TEST_MCP_ENDPOINT", "http://test.invalid/mcp")
 
 	probe := &healthProbe{}
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
@@ -136,20 +132,25 @@ func newHealthTestRuntime(t *testing.T, options *mcp.ServerOptions, toolName str
 	}}
 }
 
-func TestCheckHealthRejectsMissingAllowedTool(t *testing.T) {
-	t.Parallel()
+func checkMCPHealth(t *testing.T, runtime *Runtime) platform.DependencyHealth {
+	t.Helper()
+	checkers := runtime.MCPHealthChecks()
+	if len(checkers) != 1 {
+		t.Fatalf("MCP health checkers = %d, want 1", len(checkers))
+	}
+	return checkers[0].CheckHealth(context.Background())
+}
 
+func TestCheckHealthRejectsMissingAllowedTool(t *testing.T) {
 	_, runtime := newHealthTestRuntime(t, &mcp.ServerOptions{}, "available_tool")
 	runtime.config.Deployment.Spec.Agents[0].Tools = ToolAllowlist{Allow: map[string][]string{"test": {"missing_tool"}}}
-	health := runtime.CheckHealth(context.Background())
+	health := checkMCPHealth(t, runtime)
 	if health.OK {
 		t.Fatal("CheckHealth() accepted a server missing an allowlisted tool")
 	}
 }
 
 func TestCheckHealthValidatesEveryAgentAllowlist(t *testing.T) {
-	t.Parallel()
-
 	_, runtime := newHealthTestRuntime(t, &mcp.ServerOptions{}, "available_tool")
 	runtime.config.Deployment = &Deployment{Spec: DeploymentSpec{
 		MCPServers: []MCPServerDefinition{{Name: "test", EndpointEnv: "TEST_MCP_ENDPOINT"}},
@@ -158,11 +159,11 @@ func TestCheckHealthValidatesEveryAgentAllowlist(t *testing.T) {
 			{Name: "worker", Tools: ToolAllowlist{Allow: map[string][]string{"test": {"missing_tool"}}}},
 		},
 	}}
-	health := runtime.CheckHealth(context.Background())
+	health := checkMCPHealth(t, runtime)
 	if health.OK {
 		t.Fatal("CheckHealth() validated only the entrypoint allowlist")
 	}
-	if !strings.Contains(health.Detail, `test: missing required tool "missing_tool"`) {
-		t.Fatalf("health detail = %q, want missing server and tool", health.Detail)
+	if !strings.Contains(health.Detail, `missing required tool "missing_tool"`) {
+		t.Fatalf("health detail = %q, want missing tool", health.Detail)
 	}
 }

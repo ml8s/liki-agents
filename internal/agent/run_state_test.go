@@ -8,7 +8,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 )
 
-func TestOutputTextFollowsRFC6901(t *testing.T) {
+func TestJSONStringAtPointerFollowsRFC6901(t *testing.T) {
 	document := map[string]any{
 		"answer": "plain",
 		"a/b":    "escaped slash",
@@ -28,24 +28,28 @@ func TestOutputTextFollowsRFC6901(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.pointer, func(t *testing.T) {
-			got, err := OutputText(document, testCase.pointer)
+			got, err := jsonStringAtPointer(document, testCase.pointer)
 			if err != nil {
-				t.Fatalf("OutputText() error = %v", err)
+				t.Fatalf("jsonStringAtPointer() error = %v", err)
 			}
 			if got != testCase.want {
-				t.Fatalf("OutputText() = %q, want %q", got, testCase.want)
+				t.Fatalf("jsonStringAtPointer() = %q, want %q", got, testCase.want)
 			}
 		})
 	}
 }
 
-func TestOutputTextDecodesJSONStringState(t *testing.T) {
-	got, err := OutputText(`{"answer":"json string"}`, "/answer")
+func TestJSONStringAtPointerDecodesEncodedJSONState(t *testing.T) {
+	document, err := decodeJSONDocument([]byte(`{"answer":"json string"}`))
 	if err != nil {
-		t.Fatalf("OutputText() error = %v", err)
+		t.Fatalf("decodeJSONDocument() error = %v", err)
+	}
+	got, err := jsonStringAtPointer(document, "/answer")
+	if err != nil {
+		t.Fatalf("jsonStringAtPointer() error = %v", err)
 	}
 	if got != "json string" {
-		t.Fatalf("OutputText() = %q, want json string", got)
+		t.Fatalf("jsonStringAtPointer() = %q, want json string", got)
 	}
 }
 

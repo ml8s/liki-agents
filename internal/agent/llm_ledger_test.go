@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ml8s/liki-agents/internal/audit"
 	"github.com/ml8s/liki-agents/internal/domain"
+	"go.opentelemetry.io/otel/trace"
 	adkagent "google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/model"
 )
@@ -106,9 +108,10 @@ func (r *stubAuditRecorder) lastEvent() audit.Event {
 	return r.events[len(r.events)-1]
 }
 
-func newTestLedger() (*llmLedger, *stubAuditRecorder) {
+func newTestLedger(t *testing.T) (*llmLedger, *stubAuditRecorder) {
+	t.Helper()
 	recorder := &stubAuditRecorder{}
-	ledger := newLLMLedger(recorder, nil, "test", NewTestDeployment(&testing.T{}), func() time.Time {
+	ledger := newLLMLedger(recorder, nil, "test", NewTestDeployment(t), func() time.Time {
 		return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
 	})
 	return ledger, recorder
@@ -139,8 +142,57 @@ func testCtx() *fakeAgentContext {
 	return &fakeAgentContext{sessionID: "session_1", invocationID: "inv_1", agentName: "coordinator"}
 }
 
+func traceCtxWith(traceID, spanID string) context.Context {
+	tid, _ := trace.TraceIDFromHex(traceID)
+	sid, _ := trace.SpanIDFromHex(spanID)
+	spanContext := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    tid,
+		SpanID:     sid,
+		TraceFlags: trace.FlagsSampled,
+	})
+	return trace.ContextWithSpanContext(context.Background(), spanContext)
+}
+
+// TestLedgerReconciledTerminalKeepsTrace guards DOMAIN invariant 9: a
+// reconciled (interrupted) terminal event must carry the same trace as its
+// started fact even when reconciliation runs without a live span context.
+func TestLedgerReconciledTerminalKeepsTrace(t *testing.T) {
+	const (
+		traceID = "0102030405060708090a0b0c0d0e0f10"
+		spanID  = "0102030405060708"
+	)
+	ledger, recorder := newTestLedger(t)
+	scope := newTestScope()
+	scope.traceID = traceID
+	scope.spanID = spanID
+	if !ledger.begin("session_trace", scope) {
+		t.Fatal("begin() returned false")
+	}
+	ctx := &fakeAgentContext{
+		sessionID:    "session_trace",
+		invocationID: "inv_trace",
+		agentName:    "coordinator",
+		traceContext: traceCtxWith(traceID, spanID),
+	}
+	if _, err := ledger.beforeModel(ctx, &model.LLMRequest{Model: "test-model"}); err != nil {
+		t.Fatalf("beforeModel() error = %v", err)
+	}
+	// Reconciliation runs without a live span (context.Background inside
+	// failActive); the scope-carried trace must survive.
+	if _, err := ledger.end("session_trace", nil); err != nil {
+		t.Fatalf("end() error = %v", err)
+	}
+	failed := recorder.eventsOfType(audit.EventLLMCallFailed)
+	if len(failed) != 1 {
+		t.Fatalf("failed events = %d, want 1", len(failed))
+	}
+	if failed[0].TraceID != traceID || failed[0].SpanID != spanID {
+		t.Fatalf("reconciled trace = %s/%s, want %s/%s", failed[0].TraceID, failed[0].SpanID, traceID, spanID)
+	}
+}
+
 func TestLedgerLifecycleCompletesNormally(t *testing.T) {
-	ledger, recorder := newTestLedger()
+	ledger, recorder := newTestLedger(t)
 	scope := newTestScope()
 	if !ledger.begin("session_1", scope) {
 		t.Fatal("begin() returned false")
@@ -207,7 +259,7 @@ func TestLedgerRetainsActiveCallWhenTerminalAuditWriteFails(t *testing.T) {
 }
 
 func TestLedgerLifecycleFailurePath(t *testing.T) {
-	ledger, recorder := newTestLedger()
+	ledger, recorder := newTestLedger(t)
 	scope := newTestScope()
 	ledger.begin("session_1", scope)
 	ctx := testCtx()
@@ -235,7 +287,7 @@ func TestLedgerLifecycleFailurePath(t *testing.T) {
 }
 
 func TestLedgerInterruptedRunFailsActiveCalls(t *testing.T) {
-	ledger, recorder := newTestLedger()
+	ledger, recorder := newTestLedger(t)
 	scope := newTestScope()
 	ledger.begin("session_1", scope)
 	ctx := testCtx()
@@ -252,10 +304,39 @@ func TestLedgerInterruptedRunFailsActiveCalls(t *testing.T) {
 	if last.Status != audit.StatusFailed {
 		t.Fatalf("last event = %+v, want failed", last)
 	}
+	if last.DefinitionName == "" || last.DefinitionDigest == "" {
+		t.Fatalf("interrupted LLM audit lacks deployment provenance: %+v", last)
+	}
+}
+
+func TestLedgerOnModelErrorWithoutStartedRecordsStartedAndFailed(t *testing.T) {
+	ledger, recorder := newTestLedger(t)
+	scope := newTestScope()
+	if !ledger.begin("session_1", scope) {
+		t.Fatal("begin() returned false")
+	}
+	ctx := testCtx()
+	runErr := domain.NewError(domain.CodeRuntimeTimeout, "LLM timed out", nil)
+	if _, err := ledger.onModelError(ctx, &model.LLMRequest{Model: "test-model"}, runErr); err == nil {
+		t.Fatal("onModelError() should propagate the request error")
+	}
+	started := recorder.eventsOfType(audit.EventLLMCallStarted)
+	failed := recorder.eventsOfType(audit.EventLLMCallFailed)
+	if len(started) != 1 || len(failed) != 1 {
+		t.Fatalf("started/failed events = %d/%d, want 1/1", len(started), len(failed))
+	}
+	startedBase := strings.TrimSuffix(started[0].ID, ":"+string(audit.EventLLMCallStarted))
+	failedBase := strings.TrimSuffix(failed[0].ID, ":"+string(audit.EventLLMCallFailed))
+	if startedBase != failedBase {
+		t.Fatalf("started base %q != failed base %q", startedBase, failedBase)
+	}
+	if started[0].Status != audit.StatusRunning || failed[0].Status != audit.StatusFailed {
+		t.Fatalf("statuses = %s/%s, want running/failed", started[0].Status, failed[0].Status)
+	}
 }
 
 func TestLedgerDuplicateBeginRejected(t *testing.T) {
-	ledger, _ := newTestLedger()
+	ledger, _ := newTestLedger(t)
 	if !ledger.begin("session_1", newTestScope()) {
 		t.Fatal("first begin should succeed")
 	}
@@ -271,7 +352,7 @@ func TestLedgerDuplicateBeginRejected(t *testing.T) {
 }
 
 func TestLedgerConcurrentCallbacksDoNotRace(t *testing.T) {
-	ledger, recorder := newTestLedger()
+	ledger, recorder := newTestLedger(t)
 	scope := newTestScope()
 	ledger.begin("session_1", scope)
 

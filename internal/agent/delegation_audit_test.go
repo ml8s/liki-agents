@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,7 +12,6 @@ import (
 	"github.com/ml8s/liki-agents/internal/domain"
 	adkagent "google.golang.org/adk/v2/agent"
 	"google.golang.org/genai"
-	"strings"
 )
 
 func newDelegationAuditor(t *testing.T, branch string) (*AgentReferenceAuditor, *recordingAudit, *stubMetrics, *fakeAgentContext) {
@@ -62,7 +62,8 @@ func newDelegationAuditor(t *testing.T, branch string) (*AgentReferenceAuditor, 
 				TraceFlags: trace.FlagsSampled,
 			})
 			return trace.ContextWithSpanContext(context.Background(), spanContext)
-		}()}
+		}(),
+	}
 	sc := trace.SpanContextFromContext(ctx)
 	t.Logf("fake trace context valid=%v trace=%s", sc.IsValid(), sc.TraceID())
 	return auditor, events, metrics, ctx
