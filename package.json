@@ -4,11 +4,10 @@
     "node": ">=24.14.1 <25"
   },
   "scripts": {
-    "lint:docs": "markdownlint-cli2",
+    "lint:docs": "npx --yes markdownlint-cli2@0.23.3",
     "test:docs": "node tests/readme/contract.mjs"
   },
   "devDependencies": {
-    "markdownlint-cli2": "0.23.3",
     "remark-parse": "^11.0.0",
     "unified": "^11.0.5"
   }
