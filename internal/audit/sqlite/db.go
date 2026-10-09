@@ -59,10 +59,13 @@ func Open(path string) (*DB, error) {
 	if _, err := sqlDB.Exec("PRAGMA journal_mode = WAL"); err != nil {
 		return nil, fmt.Errorf("enable sqlite WAL: %w", err)
 	}
+	// Audit events are durable evidence: FULL synchronous commits every
+	// transaction to disk before acknowledging it. Single-process scale keeps
+	// the write cost acceptable while WAL preserves crash atomicity.
 	for _, pragma := range []string{
 		"PRAGMA foreign_keys = ON",
 		"PRAGMA busy_timeout = 5000",
-		"PRAGMA synchronous = NORMAL",
+		"PRAGMA synchronous = FULL",
 	} {
 		if _, err := sqlDB.Exec(pragma); err != nil {
 			return nil, fmt.Errorf("configure sqlite (%s): %w", pragma, err)

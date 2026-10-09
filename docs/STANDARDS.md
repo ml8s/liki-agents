@@ -17,7 +17,7 @@ rule is:
 | A2A ContextID/session mapping | A2A ContextID groups related tasks; ADK A2A executor maps ContextID to its ADK session | ADK executor defaults | Keep the official mapping. The rejected TaskID-backed session mapping changed standard context behavior. |
 | A2A extensions | Agent Card `AgentExtension` with a published URI specification | none advertised | Keep the no-extension policy unless an extension has a published specification and an SDK-supported compatibility suite. |
 | Frontend agent events | [AG-UI events](https://docs.ag-ui.com/concepts/events) | `github.com/ag-ui-protocol/ag-ui/sdks/community/go` | Keep official event objects and lifecycle rules. |
-| Tool access | [MCP Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports) | `github.com/modelcontextprotocol/go-sdk` | Keep official `tools/list` and `tools/call`; filtering is application authorization after standard discovery. Readiness accepts any SDK-supported protocol revision reached through negotiation (`2025-03-26` and later), not only the newest one. |
+| Tool access | [MCP Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports) | `github.com/modelcontextprotocol/go-sdk` | Keep official `tools/list` and `tools/call`; filtering is application authorization after standard discovery. Readiness accepts any SDK-supported protocol revision reached through negotiation (`2025-03-26` and later), not only the newest one. Stand-alone SSE delivery is disabled: the tool surface is deployment-fixed at startup. |
 | Typed output | JSON Schema 2020-12 | `github.com/google/jsonschema-go/jsonschema` | Keep. |
 | Output text location | RFC 6901 JSON Pointer | `github.com/qri-io/jsonpointer` plus static JSON Schema traversal | Keep. Pointer parsing must use the RFC library; only schema traversal is local. |
 | Content integrity | SHA-256 (`crypto/sha256`) with a lower-case `sha256:<64-hex>` value | Go standard library | Keep. Deployment pinning is configuration trust, not protocol. |
@@ -86,6 +86,20 @@ orchestrator cannot accidentally scale an unsafe process.
 A container orchestrator may restart one replica for availability, but scaling
 `replicas > 1` is not supported and must not be configured. SQLite must not be
 shared by multiple nodes.
+
+### Idempotent run boundary
+
+The runtime keeps run semantics idempotent and stateless: a given RunID
+executes at most once, the ADK session is run-scoped and deleted at terminal
+execution, and crashes are never resumed — startup recovery only appends
+`runtime_interrupted` terminal evidence. Multi-turn dialogue is owned by the
+caller (`liki-web`), which persists history and carries it into a new run.
+
+A2A same-TaskID pause-and-resume (`input-required` / long-running tools) is
+therefore out of scope for this stateless runtime: it requires cross-run
+recoverable session state, shared task/session storage, and transactional
+audit/run ownership — the phase 2 shared-state prerequisites above. The runtime
+does not claim to support it on the standard RPC surface today.
 
 ### Harmless readiness already implemented
 
