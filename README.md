@@ -10,15 +10,15 @@ machine client ──A2A JSON-RPC──┐
 liki-web ──AG-UI SSE→ liki-agents ──MCP→ external tools
 ```
 
-The runtime is domain-neutral. Deployments provide instructions, output
-contracts, delegation topology, and tool allowlists. `liki-agents` provides
-execution, protocol adaptation, security boundaries, evidence, and
-observability.
+The runtime is domain-neutral: deployments supply instructions, output
+contracts, delegation topology, and tool allowlists; `liki-agents` provides
+execution, protocol adaptation, security, evidence, and observability.
 
 ## Install
 
-Requires Go 1.26+, Node.js 24.14.1 (see `.nvmrc`), Docker Compose, and golangci-lint 2.x. Clone
-the repository and run `make build`; the binary is written to `bin/liki-agents`.
+Requires Go 1.26+, Node.js 24.14.1 (see `.nvmrc`), Docker Compose, golangci-lint
+2.x, and the SQLite CLI (`sqlite3`) for `make db-backup`. Clone the repository
+and run `make build`; the binary is written to `bin/liki-agents`.
 
 ## Quick start
 
@@ -32,23 +32,21 @@ curl -sS http://127.0.0.1:8083/readyz | jq
 ```
 
 `make run` starts only the runtime; MCP servers are external dependencies.
-`make dev` starts the Agent and MCP fixtures, loading `.env` when present. For
-browser-style testing, run `scripts/dev-chat-ui.sh` and open
-<http://127.0.0.1:8084>; that UI is development-only.
+`make dev` also starts the MCP fixtures (`liki-engine`/`liki-counsel` images
+from the Liki project) and loads `.env`. Browser testing uses
+`scripts/dev-chat-ui.sh` at <http://127.0.0.1:8084> (development-only).
 
 ## Runtime model
 
-An `AgentDeployment` is the sole source of Agent behavior and topology. Each
-Agent has a description, ADK mode, external instruction file, optional output
-contract, and explicit `tools.allow`. `mcpServers` declares logical MCP
-dependencies and the environment variables that bind their endpoint and optional
-token at runtime. The unique Agent with no incoming `sub_agents` edge is the
-entrypoint. ADK owns delegation and execution.
+An `AgentDeployment` is the sole source of Agent behavior and topology: each
+Agent has an ADK mode, instruction file, optional output contract, and an explicit
+`tools.allow`; `mcpServers` binds logical servers to endpoint/token environment
+variables; the unique root (no incoming `sub_agents` edge) is the entrypoint and
+ADK owns delegation and execution.
 
-Prompts are external instruction files. Plain text is the default output. For
-typed machine-to-machine output, an Agent may declare both a JSON Schema and a
-JSON Pointer to the user-facing string. Tool access is denied unless the tool is
-listed in that Agent's server-scoped `tools.allow` map.
+Prompts are external files and plain text is the default; typed output declares
+a JSON Schema plus a JSON Pointer to the user-facing string. Tool access is
+denied unless the tool is listed in the Agent's server-scoped `tools.allow`.
 
 The artifact is validated against
 [`contracts/agent-definition.schema.json`](contracts/agent-definition.schema.json);
@@ -65,9 +63,9 @@ semantics.
 | Machine discovery | A2A Agent Card | `GET /.well-known/agent-card.json` | standard capability metadata |
 | Tool server | MCP Streamable HTTP | outbound | deterministic tools |
 
-Operational endpoints are public `/readyz` and `/version`, plus `/metrics`.
-When an internal service token is configured, `/metrics` requires that token.
-There is no private application API and no ADK Launcher control plane.
+Operational endpoints are public `/readyz` and `/version`, plus `/metrics`
+(token-gated when an internal token is configured). There is no private
+application API or ADK Launcher control plane.
 
 ## Security boundary
 
@@ -83,20 +81,17 @@ adopted on `/ag-ui` only and never on A2A, so a machine client sharing the
 internal token cannot spoof a user identity into audit/provenance.
 
 The runtime is never directly public and never authenticates end users, issues
-sessions, stores product conversations, or trusts unverified browser identities.
-Internet-facing request rate limiting is the gateway's job (Caddy / `liki-web`);
-the runtime's internal per-source limiter serves only token-brute-force
-defense-in-depth, and run concurrency (`LIKI_MAX_CONCURRENT_RUNS`) protects
-runtime resources.
+sessions, stores conversations, or trusts unverified identities. Internet-facing
+rate limiting is the gateway's job; the internal per-source limiter only resists
+token brute force, while `LIKI_MAX_CONCURRENT_RUNS` bounds run concurrency.
 
-Local development may leave `LIKI_AGENTS_INTERNAL_TOKEN` empty. Bearer
-authentication is then disabled, but AG-UI still requires `X-Liki-User-ID`.
-Invalid bearer or identity attempts are limited per socket source; repeated
-failures return HTTP 429 with the stable `rate_limited` code.
+Local development may leave `LIKI_AGENTS_INTERNAL_TOKEN` empty, disabling bearer
+authentication, while AG-UI still requires `X-Liki-User-ID`. Invalid attempts
+are throttled per socket source and return HTTP 429 (`rate_limited`).
 
-MCP access is allowlisted per Agent and server. Evidence never contains prompts,
-raw model output, or tool payloads. Outside development, the deployment digest
-is mandatory, the LLM endpoint is HTTPS-only, and configured URLs cannot embed
+MCP access is allowlisted per Agent and server, and evidence never contains
+prompts, raw model output, or tool payloads. Outside development the deployment
+digest is mandatory and the LLM endpoint is HTTPS-only without embedded
 credentials.
 
 ## Configuration
@@ -113,21 +108,20 @@ credentials.
 | `LIKI_LOG_*` | structured logging |
 | `OTEL_*` | standard OpenTelemetry tracing settings |
 
-MCP endpoint values are complete URLs for the selected network. The gateway may
-own service prefixes (`/engine/mcp`, `/counsel/mcp/bazi`) while direct
-service-network URLs use the MCP service paths (`/mcp`, `/mcp/bazi`). The
-runtime does not rewrite MCP paths or add private protocol headers.
+MCP endpoint values are complete URLs; the gateway may own service prefixes
+(`/engine/mcp`, `/counsel/mcp/bazi`) while services expose `/mcp` and
+`/mcp/{domain}`. The runtime rewrites no MCP paths and adds no private headers.
 
-Use empty `LIKI_LLM_STRUCTURED_OUTPUT` for plain text; `json_schema` and
-`json_object` select provider modes. Concurrency is bounded to 1–1024, while
-development alone permits local HTTP LLMs and an unpinned deployment digest.
+Empty `LIKI_LLM_STRUCTURED_OUTPUT` selects plain text; `json_schema`/`json_object`
+select typed output. Concurrency is bounded to 1–1024;
+development alone permits local HTTP LLMs and unpinned deployment digests.
 
 ## Operations
 
-Use `make run` for the host process and `make dev` for Compose. `make dev-down`
-removes the workload and `make db-backup` creates an online SQLite backup. The
-runtime supports one process/replica; see
-[`docs/STANDARDS.md`](docs/STANDARDS.md) for the prerequisites for scaling it.
+Use `make run` for the host and `make dev` for Compose; `make dev-down` removes
+the workload and `make db-backup` backs up SQLite online. Compose and release
+images probe `/readyz` via the built-in `healthcheck` subcommand; the runtime
+is single-replica (see [`docs/STANDARDS.md`](docs/STANDARDS.md) for scaling).
 
 ## Observability
 
@@ -135,18 +129,17 @@ Prometheus exposes protocol latency, active streams, model calls and tokens,
 tool calls and durations, delegation activity, and dependency readiness. Logs
 use `log/slog` with stable event names. Distributed tracing uses W3C context
 propagation and standard OTLP export; MCP and LLM outbound requests carry the
-same trace context. Tracing is disabled unless a standard
-OTLP endpoint is configured:
+same trace context. Tracing is disabled unless a standard OTLP endpoint is
+configured:
 
 ```text
 OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://otel-collector:4318/v1/traces
 ```
 
-SQLite stores append-only audit events with execution metadata, versions,
-digests, duration, and stable error codes. On startup, the single-process
-runtime closes interrupted run, model, tool, and delegation lifecycles with
-synthetic `runtime_interrupted` failures; it never resumes execution or edits
-historical evidence. Audit records do not store conversation or domain payloads.
+SQLite stores append-only audit events (metadata, versions, digests, duration,
+error codes). On startup the single-process runtime closes interrupted run,
+model, tool, and delegation lifecycles with synthetic `runtime_interrupted`
+failures, never editing history; records exclude conversation or domain payloads.
 
 ## Documentation
 
@@ -156,8 +149,6 @@ historical evidence. Audit records do not store conversation or domain payloads.
 | [`docs/DOMAIN.md`](docs/DOMAIN.md) | stable runtime domain invariants |
 | [`contracts/agent-definition.schema.json`](contracts/agent-definition.schema.json) | deployment contract |
 | [`SECURITY.md`](SECURITY.md) | security policy and required controls |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md) | development workflow and review gate |
-| [`LICENSE`](LICENSE) | open-source license |
 
 ## Development
 
@@ -168,6 +159,11 @@ checks, `golangci-lint`, isolated race tests, and deployment validation. It does
 not call a real model provider or external MCP. CI additionally runs
 `govulncheck`, `npm audit`, binary and Docker image builds.
 
+### Contributing
+
+Follow [`CONTRIBUTING.md`](CONTRIBUTING.md) and run `make check`/`make gate`
+before submitting a change.
+
 ## Project boundary
 
 `liki-agents` is not an Agent management control plane. It does not provide
@@ -177,3 +173,7 @@ approval workflows, or a management console.
 `liki-web` owns users, products, entitlements, quotas, and durable product
 conversations. A Liki domain release owns prompts, skills, workflow policy, and
 tool semantics; Engine and Counsel own deterministic MCP implementations.
+
+### License
+
+Released under the [MIT License](LICENSE) by ml8s and the Liki Agents contributors.
