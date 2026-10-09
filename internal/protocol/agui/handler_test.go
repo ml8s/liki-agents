@@ -55,6 +55,12 @@ func TestAGUIRequiresPost(t *testing.T) {
 	if response.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
+	if !strings.Contains(response.Header().Get("Content-Type"), "application/problem+json") {
+		t.Fatalf("content type = %q, want problem+json", response.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(response.Body.String(), `"code":"method_not_allowed"`) {
+		t.Fatalf("body lacks stable error code: %s", response.Body.String())
+	}
 }
 
 func TestAGUIRejectsMalformedInput(t *testing.T) {

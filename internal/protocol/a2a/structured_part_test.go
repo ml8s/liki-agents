@@ -96,8 +96,8 @@ func TestAgentPartSubstitutesDeclaredPointer(t *testing.T) {
 	if part.MediaType != "application/json" {
 		t.Fatalf("artifact media type = %q", part.MediaType)
 	}
-	if part.Metadata["liki.answer"] != "最终结论" {
-		t.Fatalf("artifact answer metadata = %#v", part.Metadata)
+	if len(part.Metadata) != 0 {
+		t.Fatalf("artifact carries private metadata: %#v", part.Metadata)
 	}
 }
 

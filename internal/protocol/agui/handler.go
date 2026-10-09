@@ -644,7 +644,15 @@ func publicError(err error) (message, code string) {
 }
 
 func writeProtocolError(w http.ResponseWriter, status int, code, message string) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Type", "application/problem+json; charset=utf-8")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": code, "message": message}})
+	// RFC 9457 problem+json payload with the runtime's stable code in the
+	// standard extension field.
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"type":   "about:blank",
+		"title":  http.StatusText(status),
+		"status": status,
+		"code":   code,
+		"detail": message,
+	})
 }

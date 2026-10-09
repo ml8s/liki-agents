@@ -418,3 +418,18 @@ func TestIdentityHeaderOnlyAcceptedOnAGUI(t *testing.T) {
 		t.Fatalf("ag-ui identity = %+v, want alice", aguiID)
 	}
 }
+
+func TestErrorResponsesUseRFC9457ProblemJSON(t *testing.T) {
+	server := newServer(t, "s3cr3t")
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/a2a", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if !strings.Contains(rec.Header().Get("Content-Type"), "application/problem+json") {
+		t.Fatalf("content type = %q, want problem+json", rec.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"unauthorized"`) {
+		t.Fatalf("body lacks stable error code: %s", rec.Body.String())
+	}
+}

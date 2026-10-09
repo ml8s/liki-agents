@@ -215,8 +215,9 @@ func (s *Server) EndpointHandler() http.Handler {
 // agentPart maps native ADK parts onto A2A artifact parts. Model-text
 // visibility is decided per event author by exposesText: plain Authors stream
 // their text, structured or unknown Authors never emit raw model text. Only a
-// structured entrypoint's validated final answer becomes a data part, carrying
-// the user-facing text selected by its JSON Pointer.
+// structured entrypoint's validated final answer becomes a standard
+// application/json data part; the user-facing text is the JSON field selected
+// by its JSON Pointer, and no private metadata is carried on the wire.
 func agentPart(
 	event *session.Event,
 	part *genai.Part,
@@ -258,7 +259,6 @@ func agentPart(
 			}
 			dataPart := a2a.NewDataPart(data)
 			dataPart.MediaType = "application/json"
-			dataPart.Metadata = map[string]any{"liki.answer": output.Text}
 			return dataPart, nil
 		}
 	}

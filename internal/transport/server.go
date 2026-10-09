@@ -323,5 +323,15 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, map[string]any{"error": map[string]any{"code": code, "message": message}})
+	w.Header().Set("Content-Type", "application/problem+json; charset=utf-8")
+	w.WriteHeader(status)
+	// RFC 9457 problem+json payload with the runtime's stable code in the
+	// standard extension field.
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"type":   "about:blank",
+		"title":  http.StatusText(status),
+		"status": status,
+		"code":   code,
+		"detail": message,
+	})
 }
