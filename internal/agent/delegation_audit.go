@@ -144,7 +144,7 @@ func (a *AgentReferenceAuditor) AfterAgent(ctx adkagent.Context) (*genai.Content
 // because the run failed or was cancelled. A record is dequeued only after its
 // terminal evidence is durably appended, so a transient failure stays
 // retryable by the run's cleanup callback.
-func (a *AgentReferenceAuditor) FailPending(ctx context.Context, scope *llmRunScope, _ error) error {
+func (a *AgentReferenceAuditor) FailPending(ctx context.Context, scope *llmRunScope) error {
 	a.mu.Lock()
 	pending := make(map[string]DelegationExecutionRecord)
 	for key, record := range a.pending {
@@ -192,7 +192,7 @@ func (a *AgentReferenceAuditor) startedRecord(ctx adkagent.Context) (DelegationE
 	if path == "" {
 		path = target
 	}
-	caller, depth := callerFromAgentPath(path, target, a.entrypoint)
+	caller, depth := callerFromAgentPath(path, a.entrypoint)
 	return DelegationExecutionRecord{
 		RootRunID:             scope.runID,
 		RunID:                 scope.runID,
@@ -255,7 +255,7 @@ func (a *AgentReferenceAuditor) pendingKey(ctx adkagent.Context) string {
 	return ctx.SessionID() + "\x00" + ctx.Branch() + "\x00" + ctx.AgentName() + "\x00" + ctx.InvocationID()
 }
 
-func callerFromAgentPath(path, _, entrypoint string) (string, int) {
+func callerFromAgentPath(path, entrypoint string) (string, int) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return entrypoint, 0

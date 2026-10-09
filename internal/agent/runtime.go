@@ -500,7 +500,6 @@ func (r *Runtime) BeginAuditRun(ctx context.Context, sessionID string, scope Aud
 		runID:             domain.ID(scope.RunID),
 		threadID:          domain.ID(scope.ThreadID),
 		userID:            scope.UserID,
-		agentName:         r.entrypoint.Name,
 		protocol:          scope.Protocol,
 		model:             r.config.Model,
 		graph:             r.config.GraphVersion,
@@ -524,7 +523,7 @@ func (r *Runtime) BeginAuditRun(ctx context.Context, sessionID string, scope Aud
 	if err := r.recordAuditWithRetry(ctx, &event); err != nil {
 		r.runs.finish(scope.RunID)
 		_, _ = r.llm.end(sessionID, err)
-		_ = r.delegationAuditor.FailPending(ctx, ledgerScope, err)
+		_ = r.delegationAuditor.FailPending(ctx, ledgerScope)
 		_ = r.toolAuditor.FailPending(ctx, ledgerScope)
 		releaseRun()
 		return err
@@ -562,7 +561,7 @@ func (r *Runtime) EndAuditRun(ctx context.Context, sessionID string, runErr erro
 			terminalErr = ledgerErr
 		}
 	}
-	if auditErr := r.delegationAuditor.FailPending(ctx, scope, runErr); auditErr != nil && terminalErr == nil {
+	if auditErr := r.delegationAuditor.FailPending(ctx, scope); auditErr != nil && terminalErr == nil {
 		terminalErr = auditErr
 	}
 	if auditErr := r.toolAuditor.FailPending(ctx, scope); auditErr != nil && terminalErr == nil {
@@ -712,7 +711,6 @@ func (r *Runtime) Run(
 		runID:             domain.ID(request.RunID),
 		threadID:          domain.ID(request.ThreadID),
 		userID:            request.UserID,
-		agentName:         r.entrypoint.Name,
 		protocol:          request.Protocol,
 		model:             r.config.Model,
 		graph:             r.config.GraphVersion,
@@ -734,7 +732,7 @@ func (r *Runtime) Run(
 		runErr = auditErr
 		auditScope, _ := r.llm.scope(sessionID)
 		_, _ = r.llm.end(sessionID, runErr)
-		_ = r.delegationAuditor.FailPending(context.WithoutCancel(ctx), auditScope, runErr)
+		_ = r.delegationAuditor.FailPending(context.WithoutCancel(ctx), auditScope)
 		_ = r.toolAuditor.FailPending(context.WithoutCancel(ctx), auditScope)
 		_ = r.sessions.Delete(context.WithoutCancel(ctx), &session.DeleteRequest{
 			AppName:   r.config.AppName,
@@ -759,7 +757,7 @@ func (r *Runtime) Run(
 		if ledgerErr != nil && runErr == nil {
 			runErr = ledgerErr
 		}
-		if delegationAuditErr := r.delegationAuditor.FailPending(auditCtx, scope, runErr); delegationAuditErr != nil && runErr == nil {
+		if delegationAuditErr := r.delegationAuditor.FailPending(auditCtx, scope); delegationAuditErr != nil && runErr == nil {
 			runErr = delegationAuditErr
 		}
 		if toolAuditErr := r.toolAuditor.FailPending(auditCtx, scope); toolAuditErr != nil && runErr == nil {

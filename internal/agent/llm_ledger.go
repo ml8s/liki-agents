@@ -30,7 +30,6 @@ type llmRunScope struct {
 	threadID          domain.ID
 	userID            string
 	startedAt         time.Time
-	agentName         string
 	protocol          string
 	model             string
 	graph             string

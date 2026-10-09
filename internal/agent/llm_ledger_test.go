@@ -126,7 +126,6 @@ func newTestScope() *llmRunScope {
 		runID:             "run_1",
 		threadID:          "thread_1",
 		userID:            "user_1",
-		agentName:         "coordinator",
 		model:             "test-model",
 		graph:             "test-graph",
 		contract:          "test-contract",

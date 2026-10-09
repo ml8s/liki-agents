@@ -118,7 +118,7 @@ func TestAgentReferenceAuditorFailsPending(t *testing.T) {
 	if _, err := auditor.BeforeAgent(ctx); err != nil {
 		t.Fatalf("BeforeAgent() error = %v", err)
 	}
-	if err := auditor.FailPending(context.Background(), newTestScope(), nil); err != nil {
+	if err := auditor.FailPending(context.Background(), newTestScope()); err != nil {
 		t.Fatalf("FailPending() error = %v", err)
 	}
 	failed := events.eventsOfType(audit.EventDelegationFailed)
@@ -131,7 +131,7 @@ func TestAgentReferenceAuditorFailsPending(t *testing.T) {
 	if len(metrics.calls) != 1 || !strings.Contains(metrics.calls[0], "/failed") {
 		t.Fatalf("delegation metrics = %v", metrics.calls)
 	}
-	if err := auditor.FailPending(context.Background(), newTestScope(), nil); err != nil {
+	if err := auditor.FailPending(context.Background(), newTestScope()); err != nil {
 		t.Fatalf("second FailPending() error = %v", err)
 	}
 	if got := len(events.eventsOfType(audit.EventDelegationFailed)); got != 1 {
@@ -171,7 +171,7 @@ func TestAgentReferenceAuditorRetainsPendingWhenTerminalAuditWriteFails(t *testi
 	if _, err := auditor.AfterAgent(ctx); err == nil {
 		t.Fatal("AfterAgent() unexpectedly survived terminal audit failure")
 	}
-	if err := auditor.FailPending(context.Background(), scope, nil); err != nil {
+	if err := auditor.FailPending(context.Background(), scope); err != nil {
 		t.Fatalf("FailPending() reconciliation error = %v", err)
 	}
 	if got := len(events.eventsOfType(audit.EventDelegationFailed)); got != 1 {
