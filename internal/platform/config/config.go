@@ -117,9 +117,7 @@ func validate(cfg Config) (Config, error) {
 		return Config{}, fmt.Errorf("LIKI_ENV is unsupported: %q (expected development or production)", cfg.Env)
 	}
 	isDevelopment := cfg.Env == "development"
-	if cfg.ToolContract == "" {
-		return Config{}, fmt.Errorf("LIKI_TOOL_CONTRACT_VERSION is required")
-	}
+
 	if !isDevelopment && cfg.InternalToken == "" {
 		return Config{}, fmt.Errorf("LIKI_AGENTS_INTERNAL_TOKEN is required outside development")
 	}

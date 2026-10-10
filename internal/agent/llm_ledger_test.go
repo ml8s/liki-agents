@@ -382,6 +382,35 @@ func TestLedgerConcurrentCallbacksDoNotRace(t *testing.T) {
 	}
 }
 
+// contract_version is an audit label: it is recorded verbatim, and an unset
+// upper-layer label stays present as an empty string so the payload key set
+// remains stable for downstream evidence readers.
+func TestLedgerRecordsContractVersionVerbatim(t *testing.T) {
+	for _, contract := range []string{"test-contract", ""} {
+		deployment := NewTestDeployment(t)
+		events := &stubAuditRecorder{}
+		ledger := newLLMLedger(events, nil, "test-provider", deployment, fixedLedgerNow)
+		scope := newTestScope()
+		scope.contract = contract
+		ledger.begin("session_contract", scope)
+		ctx := &fakeAgentContext{
+			sessionID:    "session_contract",
+			invocationID: "inv_contract",
+			agentName:    "coordinator",
+		}
+		if _, err := ledger.beforeModel(ctx, &model.LLMRequest{Model: "test-model"}); err != nil {
+			t.Fatalf("beforeModel() error = %v", err)
+		}
+		started := events.eventsOfType(audit.EventLLMCallStarted)
+		if len(started) != 1 {
+			t.Fatalf("started events = %d, want 1", len(started))
+		}
+		if got := started[0].Payload["contract_version"]; got != contract {
+			t.Fatalf("contract_version = %#v, want %#v", got, contract)
+		}
+	}
+}
+
 func TestLedgerUsesInvokingAgentPromptProvenance(t *testing.T) {
 	deployment := NewTestDeployment(t)
 	root := deployment.Spec.Agents[0]
@@ -414,6 +443,9 @@ func TestLedgerUsesInvokingAgentPromptProvenance(t *testing.T) {
 	}
 	if got := started[0].Payload["prompt_version"]; got != "sha256:worker-instruction" {
 		t.Fatalf("prompt_version = %#v, want worker instruction digest", got)
+	}
+	if got := started[0].Payload["contract_version"]; got != scope.contract {
+		t.Fatalf("contract_version = %#v, want %#v", got, scope.contract)
 	}
 	if started[0].DefinitionName == "" || started[0].DefinitionDigest == "" {
 		t.Fatalf("LLM audit lacks deployment provenance: %#v", started[0])

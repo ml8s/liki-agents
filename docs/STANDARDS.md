@@ -105,6 +105,10 @@ does not claim to support it on the standard RPC surface today.
 
 Every setting lives in exactly one of the three product layers:
 
+Audit labels (provider, contract_version, graph_version, prompt_version) travel
+with the assembly artifact and are never required to boot; they are recorded
+verbatim into audit evidence but never gate runtime behavior.
+
 - **image** — protocol, security, and audit behavior; never configurable
   (HTTP timeouts, audit durability, rate limits stay at the gateway);
 - **AgentDeployment artifact** — capability: Agents, tools, skills, output

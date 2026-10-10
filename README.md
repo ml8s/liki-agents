@@ -102,7 +102,7 @@ credentials.
 |---|---|
 | `LIKI_AGENTS_*` | service address, token, audit DB path, topology, deployment file and digest pin |
 | `LIKI_MCP_*` | endpoint/token bindings for logical MCP servers (`LIKI_MCP_<NAME>_URL` / `LIKI_MCP_<NAME>_TOKEN`) |
-| `LIKI_TOOL_CONTRACT_VERSION`, `LIKI_MAX_CONCURRENT_RUNS` | provenance and bounded concurrent executions |
+| `LIKI_TOOL_CONTRACT_VERSION` (optional), `LIKI_MAX_CONCURRENT_RUNS` | provenance label and bounded concurrent executions |
 | `LIKI_LLM_*` | OpenAI-compatible client; provider is an audit label, base URL/model/provider required |
 | `LIKI_LOG_*` | structured logging |
 | `OTEL_*` | standard OpenTelemetry tracing settings |

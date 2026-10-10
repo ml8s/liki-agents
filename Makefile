@@ -62,7 +62,7 @@ test-coverage: test
 		echo "❌ coverage $$COV% < $(COVER_MIN)%" >&2; exit 1; \
 	fi
 
-check: lint-readme fmt-check lint-engine vet validate check-actions
+check: lint-readme fmt-check lint-engine vet validate check-actions check-config-surface
 
 test-db:
 	$(GO) test -race -count=1 ./internal/audit/sqlite/...
@@ -102,6 +102,9 @@ gate: check test-coverage
 
 check-actions: ## Reject mutable reusable workflow/action references
 	python3 scripts/check_actions_pinned.py
+
+check-config-surface: ## Fail when config keys drift across code, docs, and deployment
+	python3 scripts/check_config_surface.py
 
 validate:
 	@$(GO) run ./cmd/liki-agents validate -deployment $(if $(LIKI_AGENTS_DEPLOYMENT_FILE),$(LIKI_AGENTS_DEPLOYMENT_FILE),./dev/agent-deployment/deployment.json)

@@ -149,6 +149,22 @@ func TestProductionConfigurationHardening(t *testing.T) {
 
 // Regression guard: the development PublicURL default is derived from
 // DefaultAddr so the two cannot drift when the port changes.
+// The tool contract version is an upper-layer provenance label: the runtime
+// records it into audit evidence but never gates on it, so it must not be
+// required to boot (Configuration ownership: labels travel with the assembly
+// artifact, not as a runtime prerequisite).
+func TestLoadAllowsMissingToolContract(t *testing.T) {
+	baseEnv(t)
+	t.Setenv("LIKI_TOOL_CONTRACT_VERSION", "")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ToolContract != "" {
+		t.Fatalf("tool contract = %q, want empty", cfg.ToolContract)
+	}
+}
+
 func TestLoadDerivesPublicURLFromDefaultAddress(t *testing.T) {
 	baseEnv(t)
 	t.Setenv("LIKI_AGENTS_PUBLIC_URL", "")
