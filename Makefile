@@ -69,7 +69,7 @@ test-db:
 
 db-backup:
 	@bash -eu -o pipefail -c '\
-		DB_PATH="$${LIKI_DB_PATH:-./data/liki-agents-audit.db}"; \
+		DB_PATH="$${LIKI_AGENTS_DB_PATH:-./data/liki-agents-audit.db}"; \
 		BACKUP_DIR="$${LIKI_BACKUP_DIR:-./backups}"; \
 		mkdir -p "$$BACKUP_DIR"; \
 		OUT="$$BACKUP_DIR/liki-agents-audit-$$(date +%Y%m%d-%H%M%S).db"; \

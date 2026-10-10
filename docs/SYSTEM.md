@@ -66,10 +66,10 @@ ENV LIKI_AGENTS_DEPLOYMENT_DIGEST=<digest>  # CI 用本仓镜像 validate 计算
 
 | env | 说明 |
 |---|---|
-| `LIKI_MCP_ENGINE_URL` / `LIKI_ENGINE_MCP_TOKEN` | 契约 mcpServers `engine` 的 endpointEnv/tokenEnv |
-| `LIKI_MCP_COUNSEL_URL` / `LIKI_COUNSEL_MCP_TOKEN` | 契约 mcpServers `counsel` 的 endpointEnv/tokenEnv |
+| `LIKI_MCP_ENGINE_URL` / `LIKI_MCP_ENGINE_TOKEN` | 契约 mcpServers `engine` 的 endpointEnv/tokenEnv |
+| `LIKI_MCP_COUNSEL_URL` / `LIKI_MCP_COUNSEL_TOKEN` | 契约 mcpServers `counsel` 的 endpointEnv/tokenEnv |
 | `LIKI_TOOL_CONTRACT_VERSION` | 必填（config.go 校验），engine 契约版本 |
-| `LIKI_LLM_*`、`LIKI_RUN_*`、`LIKI_LOG_*` | 模型/超时/日志 |
+| `LIKI_LLM_*`、`LIKI_RUN_*`、`LIKI_LOG_*` | 模型（`BASE_URL`/`MODEL`/`PROVIDER` 必填；`MAX_OUTPUT_TOKENS` 可选）/超时/日志 |
 
 **命名必须与工件声明一致**（`runtime.go` 用 `os.LookupEnv(endpointEnv)` 读取），deploy 有契约一致性检查。
 

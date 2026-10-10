@@ -32,6 +32,8 @@ incoming-edge-free Agent is the entrypoint. Each Agent definition supplies:
 - logical MCP server declarations with endpoint/token environment references;
 - server-scoped MCP tool allowlists;
 - standard ADK delegation mode and `sub_agents`;
+- per-Agent model settings (`model`, `temperature`, `maxOutputTokens`) that
+  fall back to the runtime-wide configuration;
 - version.
 
 Prompt, output schema, and tool semantics are not built into Go.

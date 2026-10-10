@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/ml8s/liki-agents/internal/platform/config"
 )
 
 // healthcheck is the container-native readiness probe used by Docker Compose.
@@ -17,7 +19,7 @@ import (
 func healthcheck() error {
 	address := strings.TrimSpace(os.Getenv("LIKI_AGENTS_ADDR"))
 	if address == "" {
-		address = ":8083"
+		address = config.DefaultAddr
 	}
 	request, err := http.NewRequestWithContext(
 		context.Background(),

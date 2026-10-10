@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	adkagent "google.golang.org/adk/v2/agent"
@@ -76,6 +77,22 @@ func TestAgentDefinitionCompilesToStandardADKConfig(t *testing.T) {
 	}
 }
 
+func TestADKConfigCarriesMaxOutputTokens(t *testing.T) {
+	t.Parallel()
+	definition := AgentDefinition{Name: "worker"}
+	bounded := definition.ADKConfig(ADKAgentRuntime{
+		Temperature:     0.2,
+		MaxOutputTokens: 2048,
+	})
+	if bounded.GenerateContentConfig == nil || bounded.GenerateContentConfig.MaxOutputTokens != 2048 {
+		t.Fatalf("generation config = %#v, want MaxOutputTokens 2048", bounded.GenerateContentConfig)
+	}
+	unbounded := definition.ADKConfig(ADKAgentRuntime{Temperature: 0.2})
+	if unbounded.GenerateContentConfig == nil || unbounded.GenerateContentConfig.MaxOutputTokens != 0 {
+		t.Fatalf("generation config = %#v, want MaxOutputTokens 0 (unset)", unbounded.GenerateContentConfig)
+	}
+}
+
 func TestRawJSONSchemaIsUsedOnStandardOpenAICompatibleWire(t *testing.T) {
 	raw := map[string]any{
 		"type":                 "object",
@@ -97,11 +114,22 @@ func TestRawJSONSchemaIsUsedOnStandardOpenAICompatibleWire(t *testing.T) {
 	if request.Config.ResponseJsonSchema == nil {
 		t.Fatal("raw JSON Schema was not sent to provider")
 	}
-	encoded, err := json.Marshal(request.Config.ResponseJsonSchema)
+	sent, err := json.Marshal(request.Config.ResponseJsonSchema)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !json.Valid(encoded) {
-		t.Fatalf("raw schema is invalid JSON: %s", encoded)
+	encodedRaw, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sentValue, wantValue any
+	if err := json.Unmarshal(sent, &sentValue); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encodedRaw, &wantValue); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(sentValue, wantValue) {
+		t.Fatalf("raw schema altered on the wire: got %#v, want %#v", sentValue, wantValue)
 	}
 }

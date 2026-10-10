@@ -101,6 +101,20 @@ recoverable session state, shared task/session storage, and transactional
 audit/run ownership — the phase 2 shared-state prerequisites above. The runtime
 does not claim to support it on the standard RPC surface today.
 
+### Configuration ownership
+
+Every setting lives in exactly one of the three product layers:
+
+- **image** — protocol, security, and audit behavior; never configurable
+  (HTTP timeouts, audit durability, rate limits stay at the gateway);
+- **AgentDeployment artifact** — capability: Agents, tools, skills, output
+  contracts, and per-Agent model settings (`model`, `temperature`,
+  `maxOutputTokens`), pinned by digest;
+- **environment** — wiring: addresses, tokens, MCP endpoints, the LLM client
+  (base URL, model, provider label), and timeouts.
+
+A value that duplicates another layer fails closed rather than being ignored.
+
 ### Harmless readiness already implemented
 
 The runtime keeps official extension points without enabling an experimental

@@ -40,7 +40,7 @@ func TestNewRuntimeValidatesContract(t *testing.T) {
 				Deployment:    agent.NewTestDeployment(t),
 				AuditRecorder: nopAuditRecorder{},
 			},
-			expected: "llm_model_missing",
+			expected: domain.CodeLLMModelMissing,
 		},
 		{
 			name: "invalid structured output capability",
@@ -50,7 +50,7 @@ func TestNewRuntimeValidatesContract(t *testing.T) {
 				AuditRecorder:    nopAuditRecorder{},
 				StructuredOutput: "yaml",
 			},
-			expected: "structured_output_capability_invalid",
+			expected: domain.CodeStructuredOutputCapabilityInvalid,
 		},
 	}
 	for _, test := range tests {

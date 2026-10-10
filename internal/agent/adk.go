@@ -21,6 +21,9 @@ type ADKAgentRuntime struct {
 	Toolsets        []tool.Toolset
 	SubAgents       []agent.Agent
 	Temperature     float32
+	// MaxOutputTokens bounds the model response; 0 leaves the provider
+	// default unbounded.
+	MaxOutputTokens int
 	OutputKey       string
 	IsEntrypoint    bool
 
@@ -63,7 +66,8 @@ func (a *AgentDefinition) ADKConfig(runtime ADKAgentRuntime) llmagent.Config {
 		DisallowTransferToParent: runtime.IsEntrypoint,
 		DisallowTransferToPeers:  true,
 		GenerateContentConfig: &genai.GenerateContentConfig{
-			Temperature: &runtime.Temperature,
+			Temperature:     &runtime.Temperature,
+			MaxOutputTokens: int32(runtime.MaxOutputTokens),
 		},
 		OutputSchema: a.GenaiOutputSchema,
 		OutputKey:    runtime.OutputKey,

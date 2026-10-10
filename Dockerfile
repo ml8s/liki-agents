@@ -25,7 +25,7 @@ LABEL org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.created="${BUILD_TIME}" \
       org.opencontainers.image.title="liki-agents" \
       org.opencontainers.image.description="Domain-neutral Liki multi-agent runtime"
-ENV LIKI_ENV=production LIKI_AGENTS_ADDR=:8083 LIKI_AGENTS_DATA_DIR=/data LIKI_LOG_FORMAT=json
+ENV LIKI_ENV=production LIKI_AGENTS_ADDR=:8083 LIKI_AGENTS_DB_PATH=/data/liki-agents-audit.db LIKI_LOG_FORMAT=json
 ENV LIKI_AGENTS_PUBLIC_URL=http://localhost:8083
 VOLUME ["/data"]
 EXPOSE 8083

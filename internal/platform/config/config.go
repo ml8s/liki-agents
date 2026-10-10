@@ -6,13 +6,16 @@ import (
 	"math"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ml8s/liki-agents/internal/domain"
 )
+
+// DefaultAddr is the default HTTP listen address. The server and the
+// container healthcheck subcommand share it so the two cannot drift.
+const DefaultAddr = ":8083"
 
 // Config is the fully resolved runtime configuration.
 type Config struct {
@@ -21,7 +24,6 @@ type Config struct {
 	Addr                string
 	PublicURL           string
 	InternalToken       string
-	DataDir             string
 	DBPath              string
 	ToolContract        string
 	DeploymentFile      string
@@ -37,6 +39,7 @@ type Config struct {
 	LLMModel            string
 	LLMProvider         string
 	LLMTimeout          time.Duration
+	LLMMaxOutputTokens  int
 	LLMTemperature      float64
 	LogFormat           string
 	LogLevel            string
@@ -63,19 +66,17 @@ func Load() (Config, error) {
 	cfg := Config{
 		Env:                 getEnv("LIKI_ENV", "development"),
 		Topology:            Topology(strings.ToLower(strings.TrimSpace(getEnv("LIKI_AGENTS_TOPOLOGY", string(TopologySingle))))),
-		Addr:                getEnv("LIKI_AGENTS_ADDR", ":8083"),
-		PublicURL:           getEnv("LIKI_AGENTS_PUBLIC_URL", "http://127.0.0.1:8083"),
+		Addr:                getEnv("LIKI_AGENTS_ADDR", DefaultAddr),
+		PublicURL:           getEnv("LIKI_AGENTS_PUBLIC_URL", "http://127.0.0.1"+DefaultAddr),
 		InternalToken:       getEnv("LIKI_AGENTS_INTERNAL_TOKEN", ""),
-		DataDir:             getEnv("LIKI_AGENTS_DATA_DIR", "./data"),
-		DBPath:              getEnv("LIKI_DB_PATH", ""),
+		DBPath:              getEnv("LIKI_AGENTS_DB_PATH", "./data/liki-agents-audit.db"),
 		ToolContract:        getEnv("LIKI_TOOL_CONTRACT_VERSION", ""),
 		DeploymentFile:      getEnv("LIKI_AGENTS_DEPLOYMENT_FILE", ""),
 		DeploymentDigest:    strings.TrimSpace(getEnv("LIKI_AGENTS_DEPLOYMENT_DIGEST", "")),
 		SkillsRoot:          strings.TrimSpace(getEnv("LIKI_AGENTS_SKILLS_ROOT", "")),
-		MaxConcurrentRuns:   32,
-		LLMBaseURL:          getEnv("LIKI_LLM_BASE_URL", "https://api.openai.com/v1"),
+		LLMBaseURL:          getEnv("LIKI_LLM_BASE_URL", ""),
 		LLMAPIKey:           getEnv("LIKI_LLM_API_KEY", ""),
-		LLMModel:            getEnv("LIKI_LLM_MODEL", "gpt-4.1-mini"),
+		LLMModel:            getEnv("LIKI_LLM_MODEL", ""),
 		LLMProvider:         getEnv("LIKI_LLM_PROVIDER", ""),
 		LLMStructuredOutput: getEnv("LIKI_LLM_STRUCTURED_OUTPUT", ""),
 		LogFormat:           getEnv("LIKI_LOG_FORMAT", "json"),
@@ -100,6 +101,9 @@ func Load() (Config, error) {
 	if cfg.LLMTimeout, err = getDuration("LIKI_LLM_TIMEOUT_SECONDS", 120*time.Second); err != nil {
 		return Config{}, err
 	}
+	if cfg.LLMMaxOutputTokens, err = getOptionalPositiveInt("LIKI_LLM_MAX_OUTPUT_TOKENS"); err != nil {
+		return Config{}, err
+	}
 	if cfg.LLMTemperature, err = getFloat("LIKI_LLM_TEMPERATURE", 0.2); err != nil {
 		return Config{}, err
 	}
@@ -107,6 +111,11 @@ func Load() (Config, error) {
 }
 
 func validate(cfg Config) (Config, error) {
+	switch cfg.Env {
+	case "development", "production":
+	default:
+		return Config{}, fmt.Errorf("LIKI_ENV is unsupported: %q (expected development or production)", cfg.Env)
+	}
 	isDevelopment := cfg.Env == "development"
 	if cfg.ToolContract == "" {
 		return Config{}, fmt.Errorf("LIKI_TOOL_CONTRACT_VERSION is required")
@@ -117,8 +126,16 @@ func validate(cfg Config) (Config, error) {
 	if !isDevelopment && cfg.LLMAPIKey == "" {
 		return Config{}, fmt.Errorf("LIKI_LLM_API_KEY is required outside development")
 	}
-	if cfg.DBPath == "" {
-		cfg.DBPath = filepath.Join(cfg.DataDir, "liki-agents-audit.db")
+	if cfg.LLMBaseURL == "" {
+		return Config{}, fmt.Errorf("LIKI_LLM_BASE_URL is required")
+	}
+	if cfg.LLMModel == "" {
+		return Config{}, fmt.Errorf("LIKI_LLM_MODEL is required")
+	}
+	if cfg.LLMProvider == "" {
+		// The provider vocabulary is open: the value is the audit provenance
+		// label and the structured-output mode hint, not a protocol switch.
+		return Config{}, fmt.Errorf("LIKI_LLM_PROVIDER is required")
 	}
 	if cfg.DeploymentFile == "" {
 		return Config{}, fmt.Errorf("LIKI_AGENTS_DEPLOYMENT_FILE is required")
@@ -142,11 +159,6 @@ func validate(cfg Config) (Config, error) {
 		cfg.Topology = TopologySingle
 	default:
 		return Config{}, fmt.Errorf("LIKI_AGENTS_TOPOLOGY is unsupported: %q", cfg.Topology)
-	}
-	switch cfg.LLMProvider {
-	case "openai", "zhipu", "bigmodel", "glm":
-	default:
-		return Config{}, fmt.Errorf("LIKI_LLM_PROVIDER is unsupported: %q", cfg.LLMProvider)
 	}
 	switch cfg.LLMStructuredOutput {
 	case "", "none", "json_schema", "json_object":
@@ -240,6 +252,27 @@ func getInt(key string, fallback int) (int, error) {
 	value, err := strconv.Atoi(raw)
 	if err != nil {
 		return 0, fmt.Errorf("%s is not a valid integer: %q", key, raw)
+	}
+	return value, nil
+}
+
+// getOptionalPositiveInt reads an optional positive integer. An unset
+// variable returns 0, which downstream code reads as "no bound"; an explicit
+// non-positive or malformed value fails closed.
+func getOptionalPositiveInt(key string) (int, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return 0, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s is not a valid integer: %q", key, raw)
+	}
+	if value <= 0 {
+		return 0, fmt.Errorf("%s must be greater than zero, got %d", key, value)
+	}
+	if value > math.MaxInt32 {
+		return 0, fmt.Errorf("%s exceeds the supported maximum, got %d", key, value)
 	}
 	return value, nil
 }

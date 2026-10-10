@@ -91,6 +91,12 @@ type AgentDefinition struct {
 	Tools       ToolAllowlist    `json:"tools"`
 	Skills      *SkillsBinding   `json:"skills,omitempty"`
 
+	// Optional per-Agent model settings. They override the runtime-wide
+	// environment values; zero values fall back to the runtime defaults.
+	Model           string   `json:"model,omitempty"`
+	Temperature     *float64 `json:"temperature,omitempty"`
+	MaxOutputTokens int      `json:"maxOutputTokens,omitempty"`
+
 	// Runtime-only resolved values. They are never read from JSON.
 	InstructionDigest string               `json:"-"`
 	InstructionText   string               `json:"-"`
@@ -118,6 +124,34 @@ type OutputDefinition struct {
 // Structured reports whether the Agent declares a structured-output contract.
 func (o OutputDefinition) Structured() bool {
 	return o.Schema.Path != "" || o.TextPointer != ""
+}
+
+// EffectiveModel returns the Agent's model name, falling back to the
+// runtime-wide model when the artifact does not override it.
+func (a *AgentDefinition) EffectiveModel(runtime string) string {
+	if a.Model != "" {
+		return a.Model
+	}
+	return runtime
+}
+
+// EffectiveTemperature returns the Agent's model temperature, falling back to
+// the runtime-wide temperature when the artifact does not override it.
+func (a *AgentDefinition) EffectiveTemperature(runtime float32) float32 {
+	if a.Temperature != nil {
+		return float32(*a.Temperature)
+	}
+	return runtime
+}
+
+// EffectiveMaxOutputTokens returns the Agent's output bound, falling back to
+// the runtime-wide bound when the artifact does not override it. Zero means
+// the provider default is left unbounded.
+func (a *AgentDefinition) EffectiveMaxOutputTokens(runtime int) int {
+	if a.MaxOutputTokens > 0 {
+		return a.MaxOutputTokens
+	}
+	return runtime
 }
 
 // ExposesModelText is the single policy for model-text visibility. A plain-text

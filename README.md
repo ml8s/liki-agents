@@ -100,11 +100,10 @@ credentials.
 
 | Prefix / variable | Purpose |
 |---|---|
-| `LIKI_AGENTS_*` | service address, token, data path, topology, artifact and digest pin |
-| `LIKI_DB_PATH` | SQLite audit database |
-| `LIKI_MCP_*`, `LIKI_*_MCP_TOKEN` | endpoint/token bindings for logical MCP servers |
+| `LIKI_AGENTS_*` | service address, token, audit DB path, topology, deployment file and digest pin |
+| `LIKI_MCP_*` | endpoint/token bindings for logical MCP servers (`LIKI_MCP_<NAME>_URL` / `LIKI_MCP_<NAME>_TOKEN`) |
 | `LIKI_TOOL_CONTRACT_VERSION`, `LIKI_MAX_CONCURRENT_RUNS` | provenance and bounded concurrent executions |
-| `LIKI_LLM_*` | OpenAI-compatible model provider |
+| `LIKI_LLM_*` | OpenAI-compatible client; provider is an audit label, base URL/model/provider required |
 | `LIKI_LOG_*` | structured logging |
 | `OTEL_*` | standard OpenTelemetry tracing settings |
 
@@ -112,9 +111,10 @@ MCP endpoint values are complete URLs; the gateway may own service prefixes
 (`/engine/mcp`, `/counsel/mcp/bazi`) while services expose `/mcp` and
 `/mcp/{domain}`. The runtime rewrites no MCP paths and adds no private headers.
 
-Empty `LIKI_LLM_STRUCTURED_OUTPUT` selects plain text; `json_schema`/`json_object`
-select typed output. Concurrency is bounded to 1–1024;
-development alone permits local HTTP LLMs and unpinned deployment digests.
+Empty `LIKI_LLM_STRUCTURED_OUTPUT` derives the mode from the deployment and
+provider; explicit modes fail closed without an output schema. Per-Agent model
+settings live in the artifact. Concurrency is bounded to 1–1024; development
+alone permits local HTTP LLMs and unpinned deployment digests.
 
 ## Operations
 

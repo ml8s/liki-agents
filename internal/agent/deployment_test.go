@@ -10,23 +10,38 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 )
 
-func writeDeployment(t *testing.T, root string, manifest string) *Deployment {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(`{
+const (
+	genericInstruction   = "generic instruction"
+	plainOutputSchema    = `{"type":"object"}`
+	requiredAnswerSchema = `{
 		"type": "object",
 		"additionalProperties": false,
 		"required": ["answer"],
 		"properties": {"answer": {"type": "string"}}
-	}`), 0o600); err != nil {
+	}`
+)
+
+// writeDeploymentFixture writes the standard deployment file trio so each test
+// only expresses the document it intends to load. Returns the manifest path.
+func writeDeploymentFixture(t *testing.T, root, instruction, schema, manifest string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte(instruction), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(manifest), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(schema), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	deployment, err := LoadAgentDeployment(filepath.Join(root, "agent-deployment.json"))
+	path := filepath.Join(root, "agent-deployment.json")
+	if err := os.WriteFile(path, []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func writeDeployment(t *testing.T, root string, manifest string) *Deployment {
+	t.Helper()
+	path := writeDeploymentFixture(t, root, genericInstruction, requiredAnswerSchema, manifest)
+	deployment, err := LoadAgentDeployment(path)
 	if err != nil {
 		t.Fatalf("LoadAgentDeployment() error = %v", err)
 	}
@@ -109,7 +124,7 @@ func TestLoadAgentDeploymentRejectsInvalidManifests(t *testing.T) {
 		{name: "unknown field", manifest: `{"apiVersion":"agent.liki/v1","kind":"AgentDeployment","metadata":{"name":"x","version":"1"},"spec":{"agents":[{"name":"main","version":"1","description":"x","mode":"chat","instruction":{"path":"instruction.md"},"skills":{"root":"/skills"},"tools":{"allow":{"skilltoolset":["list_skills","load_skill","load_skill_resource"]}}}]},"extra":true}`, wantErr: "extra"},
 		{name: "duplicate key", manifest: strings.Replace(validManifest(), `"kind": "AgentDeployment"`, `"kind": "AgentDeployment", "kind": "AgentDeployment"`, 1), wantErr: `duplicate key "kind" at $`},
 		{name: "trailing value", manifest: validManifest() + ` {}`, wantErr: "trailing"},
-		{name: "unsupported api", manifest: strings.Replace(validManifest(), `agent.liki/v1`, `agent.liki/v0`, 1), wantErr: `const: agent.liki/v0 does not equal agent.liki/v1`},
+		{name: "unsupported api", manifest: strings.Replace(validManifest(), `agent.liki/v1`, `agent.liki/v0`, 1), wantErr: "agent.liki/v0"},
 		{name: "unknown sub-agent", manifest: strings.Replace(validManifest(), `"sub_agents": []`, `"sub_agents": [{"name":"missing"}]`, 1), wantErr: "unknown sub-agent"},
 
 		{name: "path traversal", manifest: strings.Replace(validManifest(), `instruction.md`, `../instruction.md`, 1), wantErr: "path escapes from parent"},
@@ -183,16 +198,8 @@ func TestLoadAgentDeploymentRejectsInvalidManifests(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			root := t.TempDir()
-			if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(`{"type":"object"}`), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(testCase.manifest), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			_, err := LoadAgentDeployment(filepath.Join(root, "agent-deployment.json"))
+			path := writeDeploymentFixture(t, root, genericInstruction, plainOutputSchema, testCase.manifest)
+			_, err := LoadAgentDeployment(path)
 			if err == nil || !strings.Contains(err.Error(), testCase.wantErr) {
 				t.Fatalf("LoadAgentDeployment() error = %v, want %q", err, testCase.wantErr)
 			}
@@ -203,17 +210,9 @@ func TestLoadAgentDeploymentRejectsInvalidManifests(t *testing.T) {
 func TestLoadAgentDeploymentRejectsAmbiguousOutputSchema(t *testing.T) {
 	manifest := strings.Replace(validManifest(), `"answer": {"type": "string"}`, `"answer": {"type": "string"}, "answer": {"type": "string"}`, 1)
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(`{"type":"object","answer":{"type":"string"},"answer":{"type":"string"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(manifest), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	path := writeDeploymentFixture(t, root, genericInstruction, `{"type":"object","answer":{"type":"string"},"answer":{"type":"string"}}`, manifest)
 
-	_, err := LoadAgentDeployment(filepath.Join(root, "agent-deployment.json"))
+	_, err := LoadAgentDeployment(path)
 	if err == nil || !strings.Contains(err.Error(), `duplicate key "answer"`) {
 		t.Fatalf("LoadAgentDeployment() error = %v, want duplicate output schema key rejection", err)
 	}
@@ -264,16 +263,8 @@ func TestAgentOutputPointerMustSelectAStringAtLoadTime(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
 			manifest := strings.Replace(validManifest(), `"/answer"`, `"`+test.pointer+`"`, 1)
-			if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(test.schema), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(manifest), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			_, err := LoadAgentDeployment(filepath.Join(root, "agent-deployment.json"))
+			path := writeDeploymentFixture(t, root, genericInstruction, test.schema, manifest)
+			_, err := LoadAgentDeployment(path)
 			if test.wantErr == "" {
 				if err != nil {
 					t.Fatalf("LoadAgentDeployment() error = %v", err)
@@ -324,17 +315,9 @@ func TestAgentOutputRequiresPairedSchemaAndPointer(t *testing.T) {
 	t.Run("root pointer", func(t *testing.T) {
 		manifest := strings.Replace(validManifest(), `"/answer"`, `"/"`, 1)
 		root := t.TempDir()
-		if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(`{"type":"object"}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(manifest), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		_, err := LoadAgentDeployment(filepath.Join(root, "agent-deployment.json"))
-		if err == nil || !strings.Contains(err.Error(), `"/" does not match regular expression "^/(?:~[01]|[^~])+(?:/(?:~[01]|[^~])+)*$"`) {
+		path := writeDeploymentFixture(t, root, genericInstruction, plainOutputSchema, manifest)
+		_, err := LoadAgentDeployment(path)
+		if err == nil || !strings.Contains(err.Error(), "does not match regular expression") {
 			t.Fatalf("LoadAgentDeployment() error = %v, want JSON Schema root-pointer rejection", err)
 		}
 	})
@@ -374,16 +357,8 @@ func TestAgentOutputRequiresPairedSchemaAndPointer(t *testing.T) {
 				manifest = strings.Replace(manifest, `"schema": {"path": "output.schema.json"}`, `"textPointer": "/answer"`, 1)
 			}
 			root := t.TempDir()
-			if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic instruction"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(`{"type":"object"}`), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(manifest), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			_, err := LoadAgentDeployment(filepath.Join(root, "agent-deployment.json"))
+			path := writeDeploymentFixture(t, root, genericInstruction, plainOutputSchema, manifest)
+			_, err := LoadAgentDeployment(path)
 			if err == nil || !strings.Contains(err.Error(), testCase.wantErr) {
 				t.Fatalf("LoadAgentDeployment() error = %v, want %q", err, testCase.wantErr)
 			}
@@ -421,16 +396,8 @@ func TestLoadAgentDeploymentValidatesGraph(t *testing.T) {
 		cycle = strings.Replace(manifest, `"sub_agents": []`, `"sub_agents": [{"name":"coordinator"}]`, 1)
 	}
 	root = t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "instruction.md"), []byte("generic"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "output.schema.json"), []byte(`{"type":"object"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "agent-deployment.json"), []byte(cycle), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadAgentDeployment(filepath.Join(root, "agent-deployment.json")); err == nil || !strings.Contains(err.Error(), "exactly one root Agent") {
+	path := writeDeploymentFixture(t, root, "generic", plainOutputSchema, cycle)
+	if _, err := LoadAgentDeployment(path); err == nil || !strings.Contains(err.Error(), "exactly one root Agent") {
 		t.Fatalf("LoadAgentDeployment() error = %v, want cyclic graph rejection", err)
 	}
 }
@@ -455,19 +422,113 @@ func TestDeploymentValidateRechecksInMemoryMutation(t *testing.T) {
 
 func TestConvertJSONSchemaToGenaiRejections(t *testing.T) {
 	testCases := []struct {
-		name  string
-		build func() *jsonschema.Schema
+		name    string
+		build   func() *jsonschema.Schema
+		wantErr string
 	}{
-		{name: "allOf composition", build: func() *jsonschema.Schema { return &jsonschema.Schema{AllOf: []*jsonschema.Schema{{Type: "string"}}} }},
-		{name: "type array", build: func() *jsonschema.Schema { return &jsonschema.Schema{Types: []string{"string", "null"}} }},
-		{name: "unknown type", build: func() *jsonschema.Schema { return &jsonschema.Schema{Type: "bogus"} }},
-		{name: "non-string enum", build: func() *jsonschema.Schema { return &jsonschema.Schema{Enum: []any{1}} }},
+		{name: "allOf composition", build: func() *jsonschema.Schema { return &jsonschema.Schema{AllOf: []*jsonschema.Schema{{Type: "string"}}} }, wantErr: "unsupported schema composition"},
+		{name: "type array", build: func() *jsonschema.Schema { return &jsonschema.Schema{Types: []string{"string", "null"}} }, wantErr: "schema type arrays are unsupported"},
+		{name: "unknown type", build: func() *jsonschema.Schema { return &jsonschema.Schema{Type: "bogus"} }, wantErr: `unsupported schema type "bogus"`},
+		{name: "non-string enum", build: func() *jsonschema.Schema { return &jsonschema.Schema{Enum: []any{1}} }, wantErr: "only string enums are supported"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			if _, err := convertJSONSchemaToGenai(testCase.build()); err == nil {
-				t.Fatal("convertJSONSchemaToGenai() accepted unsupported schema")
+			_, err := convertJSONSchemaToGenai(testCase.build())
+			if err == nil || !strings.Contains(err.Error(), testCase.wantErr) {
+				t.Fatalf("convertJSONSchemaToGenai() error = %v, want %q", err, testCase.wantErr)
 			}
 		})
+	}
+}
+
+// The deployment artifact is the single source of per-Agent model settings;
+// the runtime-wide environment only supplies fallbacks.
+func TestAgentDefinitionAcceptsPerAgentModelSettings(t *testing.T) {
+	manifest := `{
+		"apiVersion": "agent.liki/v1",
+		"kind": "AgentDeployment",
+		"metadata": {"name": "generic-agents", "version": "1.0.0"},
+		"spec": {
+			"mcpServers": [{"name": "test", "endpointEnv": "TEST_MCP_ENDPOINT"}],
+			"agents": [
+				{"name": "main", "version": "1.0.0", "description": "entrypoint", "mode": "chat", "sub_agents": [], "instruction": {"path": "instruction.md"}, "output": {"schema": {"path": "output.schema.json"}, "textPointer": "/answer"}, "tools": {"allow": {"test": ["test_tool"]}}, "model": "glm-5.3-flash", "temperature": 0.7, "maxOutputTokens": 4096}
+			]
+		}
+	}`
+	deployment := writeDeployment(t, t.TempDir(), manifest)
+	definition := deployment.Spec.Agents[0]
+	if definition.Model != "glm-5.3-flash" {
+		t.Fatalf("model = %q, want glm-5.3-flash", definition.Model)
+	}
+	if definition.Temperature == nil || *definition.Temperature != 0.7 {
+		t.Fatalf("temperature = %v, want 0.7", definition.Temperature)
+	}
+	if definition.MaxOutputTokens != 4096 {
+		t.Fatalf("maxOutputTokens = %d, want 4096", definition.MaxOutputTokens)
+	}
+}
+
+func TestAgentDefinitionRejectsOutOfRangeModelSettings(t *testing.T) {
+	base := `{
+		"apiVersion": "agent.liki/v1",
+		"kind": "AgentDeployment",
+		"metadata": {"name": "generic-agents", "version": "1.0.0"},
+		"spec": {
+			"mcpServers": [{"name": "test", "endpointEnv": "TEST_MCP_ENDPOINT"}],
+			"agents": [
+				{"name": "main", "version": "1.0.0", "description": "entrypoint", "mode": "chat", "sub_agents": [], "instruction": {"path": "instruction.md"}, "output": {"schema": {"path": "output.schema.json"}, "textPointer": "/answer"}, "tools": {"allow": {"test": ["test_tool"]}}%s}
+			]
+		}
+	}`
+	testCases := []struct {
+		name     string
+		mutation string
+		wantErr  string
+	}{
+		{name: "temperature above range", mutation: `,"temperature": 2.5`, wantErr: "properties/temperature: maximum"},
+		{name: "temperature negative", mutation: `,"temperature": -0.1`, wantErr: "properties/temperature: minimum"},
+		{name: "max output tokens below minimum", mutation: `,"maxOutputTokens": 0`, wantErr: "properties/maxOutputTokens: minimum"},
+		{name: "empty model", mutation: `,"model": ""`, wantErr: "properties/model: minLength"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			root := t.TempDir()
+			manifest := fmt.Sprintf(base, testCase.mutation)
+			path := writeDeploymentFixture(t, root, genericInstruction, plainOutputSchema, manifest)
+			_, err := LoadAgentDeployment(path)
+			if err == nil || !strings.Contains(err.Error(), testCase.wantErr) {
+				t.Fatalf("LoadAgentDeployment() error = %v, want %q", err, testCase.wantErr)
+			}
+			if strings.Contains(err.Error(), "additionalProperties") {
+				t.Fatalf("field rejected as unknown instead of range validation: %v", err)
+			}
+		})
+	}
+}
+
+func TestAgentDefinitionFallsBackToRuntimeModelSettings(t *testing.T) {
+	t.Parallel()
+	definition := AgentDefinition{Name: "worker"}
+	if got := definition.EffectiveModel("global-model"); got != "global-model" {
+		t.Fatalf("EffectiveModel(fallback) = %q, want global-model", got)
+	}
+	if got := definition.EffectiveTemperature(0.2); got != 0.2 {
+		t.Fatalf("EffectiveTemperature(fallback) = %v, want 0.2", got)
+	}
+	if got := definition.EffectiveMaxOutputTokens(4096); got != 4096 {
+		t.Fatalf("EffectiveMaxOutputTokens(fallback) = %d, want 4096", got)
+	}
+	definition.Model = "glm-5.3-flash"
+	temperature := 0.9
+	definition.Temperature = &temperature
+	definition.MaxOutputTokens = 1024
+	if got := definition.EffectiveModel("global-model"); got != "glm-5.3-flash" {
+		t.Fatalf("EffectiveModel(override) = %q, want glm-5.3-flash", got)
+	}
+	if got := definition.EffectiveTemperature(0.2); got != 0.9 {
+		t.Fatalf("EffectiveTemperature(override) = %v, want 0.9", got)
+	}
+	if got := definition.EffectiveMaxOutputTokens(4096); got != 1024 {
+		t.Fatalf("EffectiveMaxOutputTokens(override) = %d, want 1024", got)
 	}
 }

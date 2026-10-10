@@ -99,20 +99,25 @@ func TestAgentDefinitionRejectsIncompleteDocuments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AgentDefinition() error = %v", err)
 	}
-	testCases := map[string]string{
-		"empty object":       `{}`,
-		"missing spec":       `{"apiVersion":"agent.liki/v1","kind":"AgentDeployment","metadata":{"name":"x","version":"1.0.0"}}`,
-		"wrong kind":         `{"apiVersion":"agent.liki/v1","kind":"Deployment","metadata":{"name":"x","version":"1.0.0"},"spec":{}}`,
-		"missing version":    `{"apiVersion":"agent.liki/v1","kind":"AgentDeployment","metadata":{"name":"x"},"spec":{}}`,
-		"unknown apiVersion": `{"apiVersion":"agent.liki/v2","kind":"AgentDeployment","metadata":{"name":"x","version":"1.0.0"},"spec":{}}`,
+	testCases := []struct {
+		name    string
+		raw     string
+		wantErr string
+	}{
+		{name: "empty object", raw: `{}`, wantErr: `missing properties: ["apiVersion" "kind" "metadata" "spec"]`},
+		{name: "missing spec", raw: `{"apiVersion":"agent.liki/v1","kind":"AgentDeployment","metadata":{"name":"x","version":"1.0.0"}}`, wantErr: `missing properties: ["spec"]`},
+		{name: "wrong kind", raw: `{"apiVersion":"agent.liki/v1","kind":"Deployment","metadata":{"name":"x","version":"1.0.0"},"spec":{"agents":[{"name":"main","version":"1.0.0","description":"d","mode":"chat","instruction":{"path":"instruction.md"},"tools":{"allow":{}}}]}}`, wantErr: "const: Deployment does not equal AgentDeployment"},
+		{name: "missing metadata version", raw: `{"apiVersion":"agent.liki/v1","kind":"AgentDeployment","metadata":{"name":"x"},"spec":{"agents":[{"name":"main","version":"1.0.0","description":"d","mode":"chat","instruction":{"path":"instruction.md"},"tools":{"allow":{}}}]}}`, wantErr: `/properties/metadata: required: missing properties: ["version"]`},
+		{name: "unknown apiVersion", raw: `{"apiVersion":"agent.liki/v2","kind":"AgentDeployment","metadata":{"name":"x","version":"1.0.0"},"spec":{"agents":[{"name":"main","version":"1.0.0","description":"d","mode":"chat","instruction":{"path":"instruction.md"},"tools":{"allow":{}}}]}}`, wantErr: "const: agent.liki/v2 does not equal agent.liki/v1"},
 	}
-	for name, raw := range testCases {
+	for _, testCase := range testCases {
 		var document any
-		if err := json.Unmarshal([]byte(raw), &document); err != nil {
-			t.Fatalf("%s: invalid test JSON: %v", name, err)
+		if err := json.Unmarshal([]byte(testCase.raw), &document); err != nil {
+			t.Fatalf("%s: invalid test JSON: %v", testCase.name, err)
 		}
-		if err := schema.Validate(document); err == nil {
-			t.Errorf("%s: expected validation error, got nil", name)
+		err := schema.Validate(document)
+		if err == nil || !strings.Contains(err.Error(), testCase.wantErr) {
+			t.Errorf("%s: Validate() error = %v, want %q", testCase.name, err, testCase.wantErr)
 		}
 	}
 }

@@ -257,18 +257,9 @@ func newTestRuntimeWithLimit(
 		t.Fatalf("connect test MCP server: %v", err)
 	}
 	t.Cleanup(func() { _ = serverSession.Close() })
-	entrypoint, err := deployment.EntrypointDefinition()
-	if err != nil {
-		t.Fatalf("select entrypoint: %v", err)
-	}
-	structuredOutput := StructuredOutputNone
-	if entrypoint.Output.Structured() {
-		structuredOutput = StructuredOutputJSONSchema
-	}
 	runtime, err := NewRuntime(Config{
 		Model:             "fake-model",
 		Deployment:        deployment,
-		StructuredOutput:  structuredOutput,
 		AuditRecorder:     events,
 		ContractVersion:   "test-contract",
 		MaxConcurrentRuns: maxRuns,
@@ -297,6 +288,22 @@ func plainTestDeployment(t *testing.T) *Deployment {
 		t.Fatalf("validate plain deployment: %v", err)
 	}
 	return deployment
+}
+
+// The deployment is the single source of truth for whether structured output
+// is used. An explicit mode with a plain-text deployment carries no
+// information and fails closed instead of being silently ignored.
+func TestNewRuntimeRejectsRedundantStructuredOutputMode(t *testing.T) {
+	_, err := NewRuntime(Config{
+		Model:            "fake-model",
+		Deployment:       plainTestDeployment(t),
+		StructuredOutput: StructuredOutputJSONObject,
+		AuditRecorder:    &recordingAudit{},
+	})
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeStructuredOutputCapabilityInvalid {
+		t.Fatalf("NewRuntime() error = %v, want %s", err, domain.CodeStructuredOutputCapabilityInvalid)
+	}
 }
 
 func TestRuntimeRunReturnsPlainTextForGenericAgent(t *testing.T) {

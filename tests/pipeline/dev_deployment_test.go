@@ -21,12 +21,14 @@ func TestDevelopmentAgentDeploymentRegistersComplementaryMCPTools(t *testing.T) 
 	for _, server := range deployment.Spec.MCPServers {
 		servers[server.Name] = server
 	}
+	// Endpoint and token variables share the LIKI_MCP_<NAME> prefix so a
+	// server's binding can be found by name.
 	engine, ok := servers["engine"]
-	if !ok || engine.EndpointEnv != "LIKI_MCP_ENGINE_URL" {
+	if !ok || engine.EndpointEnv != "LIKI_MCP_ENGINE_URL" || engine.TokenEnv != "LIKI_MCP_ENGINE_TOKEN" {
 		t.Fatalf("Engine MCP declaration = %+v", engine)
 	}
 	counsel, ok := servers["counsel"]
-	if !ok || counsel.EndpointEnv != "LIKI_MCP_COUNSEL_URL" {
+	if !ok || counsel.EndpointEnv != "LIKI_MCP_COUNSEL_URL" || counsel.TokenEnv != "LIKI_MCP_COUNSEL_TOKEN" {
 		t.Fatalf("Counsel MCP declaration = %+v", counsel)
 	}
 

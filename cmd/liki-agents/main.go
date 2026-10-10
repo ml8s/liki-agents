@@ -91,6 +91,7 @@ func run() (err error) {
 		TracerProvider:    tracerProvider.Provider(),
 		Provider:          cfg.LLMProvider,
 		StructuredOutput:  cfg.LLMStructuredOutput,
+		MaxOutputTokens:   cfg.LLMMaxOutputTokens,
 		ContractVersion:   cfg.ToolContract,
 		GraphVersion:      buildinfo.GraphVersion,
 		Deployment:        deployment,

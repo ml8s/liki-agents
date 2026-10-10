@@ -9,7 +9,7 @@ skill/project.
 | Concept | Meaning |
 |---|---|
 | AgentDeployment | External deployment artifact containing one or more Agent definitions |
-| AgentDefinition | One Agent's instruction, optional output schema, and server-scoped tool allowlist |
+| AgentDefinition | One Agent's instruction, optional output schema, server-scoped tool allowlist, and per-Agent model settings with runtime-wide fallback |
 | MCP server | A logical external tool dependency bound through environment references |
 | Run | One stateless execution identified by `RunID` and `ThreadID` |
 | Tool execution | One allowlisted MCP tool invocation |

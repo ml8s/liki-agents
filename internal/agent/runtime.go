@@ -129,6 +129,7 @@ func NewRuntime(config Config) (*Runtime, error) {
 		return nil, domain.NewError(domain.CodeLLMModelMissing, "LLM model is required", domain.ErrInvalidInput)
 	}
 	if config.ModelTimeout <= 0 {
+		// Zero-value fallback must match platform/config's Load default.
 		config.ModelTimeout = 120 * time.Second
 	}
 	if config.AuditRecorder == nil {
@@ -161,14 +162,18 @@ func NewRuntime(config Config) (*Runtime, error) {
 			structuredAgents++
 		}
 	}
-	if structuredAgents > 0 && config.StructuredOutput == StructuredOutputNone ||
-		structuredAgents == 0 && config.StructuredOutput != StructuredOutputNone {
-		return nil, domain.NewError(domain.CodeStructuredOutputCapabilityInvalid, "structured output capability does not match AgentDeployment", domain.ErrInvalidInput)
+	switch {
+	case structuredAgents == 0 && config.StructuredOutput != StructuredOutputNone:
+		return nil, domain.NewError(domain.CodeStructuredOutputCapabilityInvalid, "structured output mode is set but no Agent declares an output schema", domain.ErrInvalidInput)
+	case structuredAgents > 0 && config.StructuredOutput == StructuredOutputNone:
+		config.StructuredOutput = DefaultStructuredOutputMode(config.Provider)
 	}
 	if config.MCPTimeout <= 0 {
+		// Zero-value fallback must match platform/config's Load default.
 		config.MCPTimeout = 30 * time.Second
 	}
 	if config.MaxConcurrentRuns <= 0 {
+		// Zero-value fallback must match platform/config's Load default.
 		config.MaxConcurrentRuns = 32
 	}
 	if config.Now == nil {
@@ -193,32 +198,34 @@ func NewRuntime(config Config) (*Runtime, error) {
 		sessionService = config.SessionService
 	}
 
-	var aiModel model.LLM
+	var resolveModel func(string) (model.LLM, error)
 	if config.modelOverride != nil {
-		aiModel = config.modelOverride
+		resolveModel = func(string) (model.LLM, error) { return config.modelOverride, nil }
 	} else {
-		var err error
 		// Use ADK's official OpenAI-compatible model. The provider-aware
 		// structured-output adapter handles providers without JSON schema mode.
-		aiModel, err = openaimodel.NewModel(context.Background(), config.Model, &openaimodel.ClientConfig{
-			APIKey:  config.ModelAPIKey,
-			BaseURL: config.ModelBaseURL,
-			HTTPClient: &http.Client{
-				Timeout:   config.ModelTimeout,
-				Transport: otelhttp.NewTransport(http.DefaultTransport),
-			},
-		})
-		if err != nil {
-			return nil, domain.NewError(domain.CodeLLMUnavailable, "create LLM model", err)
-		}
 		useJSONObject := config.StructuredOutput == StructuredOutputJSONObject
-		if useJSONObject {
-			compatModel, err := newJSONObjectModel(aiModel)
+		resolveModel = newModelResolver(func(modelName string) (model.LLM, error) {
+			built, err := openaimodel.NewModel(context.Background(), modelName, &openaimodel.ClientConfig{
+				APIKey:  config.ModelAPIKey,
+				BaseURL: config.ModelBaseURL,
+				HTTPClient: &http.Client{
+					Timeout:   config.ModelTimeout,
+					Transport: otelhttp.NewTransport(http.DefaultTransport),
+				},
+			})
+			if err != nil {
+				return nil, domain.NewError(domain.CodeLLMUnavailable, "create LLM model", err)
+			}
+			if !useJSONObject {
+				return built, nil
+			}
+			compatModel, err := newJSONObjectModel(built)
 			if err != nil {
 				return nil, domain.NewError(domain.CodeRuntimeInitFailed, "create provider structured output model", err)
 			}
-			aiModel = compatModel
-		}
+			return compatModel, nil
+		}).resolve
 	}
 	temperature := float32(config.Temperature)
 	ledger := newLLMLedger(config.AuditRecorder, config.Metrics, config.Provider, config.Deployment, config.Now)
@@ -288,12 +295,18 @@ func NewRuntime(config Config) (*Runtime, error) {
 			toolsets = append(toolsets, skillToolset)
 		}
 		delete(building, definition.Name)
+		// Per-Agent model settings fall back to the runtime-wide defaults.
+		aiModel, err := resolveModel(definition.EffectiveModel(config.Model))
+		if err != nil {
+			return nil, err
+		}
 		built, err := llmagent.New(definition.ADKConfig(ADKAgentRuntime{
 			RawOutputSchema: definition.RawOutputSchema,
 			Model:           aiModel,
 			Toolsets:        toolsets,
 			SubAgents:       subAgents,
-			Temperature:     temperature,
+			Temperature:     definition.EffectiveTemperature(temperature),
+			MaxOutputTokens: definition.EffectiveMaxOutputTokens(config.MaxOutputTokens),
 			OutputKey:       outputKey,
 			IsEntrypoint:    definition.Name == entrypoint.Name,
 			BeforeModelCallbacks: []llmagent.BeforeModelCallback{
