@@ -108,6 +108,7 @@
       });
       currentAgent = agent;
 
+      const toolNames = new Map();
       try {
         const result = await agent.runAgent({ runId: crypto.randomUUID() }, {
           onRunStartedEvent() { setStatus("running"); },
@@ -119,8 +120,14 @@
             assistant.content += event.delta;
             renderMessage(assistant);
           },
-          onToolCallStartEvent({ event }) { setStatus(`tool: ${event.toolCallName}`); },
-          onToolCallEndEvent({ event }) { setStatus(`tool complete: ${event.toolCallName}`); },
+          onToolCallStartEvent({ event }) {
+            toolNames.set(event.toolCallId, event.toolCallName);
+            setStatus(`tool: ${event.toolCallName}`);
+          },
+          onToolCallEndEvent({ event }) {
+            setStatus(`tool complete: ${toolNames.get(event.toolCallId) ?? event.toolCallId}`);
+            toolNames.delete(event.toolCallId);
+          },
           onSubagentStartedEvent({ event }) { setStatus(`agent: ${event.name}`); },
           onSubagentFinishedEvent() { setStatus("agent complete"); },
           onSubagentErrorEvent({ event }) { setStatus(`agent failed: ${event.message}`, true); },
